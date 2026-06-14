@@ -49,6 +49,9 @@ class VSCodeTheme:
         "scroll_bg": "#e8e8e8",
         "scroll_trough": "#e8e8e8",
         "scroll_thumb": "#c8c8c8",
+
+        "selection_bg": "#cce8ff",
+        "selection_fg": "#212529",
     }
 
     DARK = {
@@ -95,6 +98,9 @@ class VSCodeTheme:
         "scroll_bg": "#252526",
         "scroll_trough": "#252526",
         "scroll_thumb": "#424242",
+
+        "selection_bg": "#264f78",
+        "selection_fg": "#ffffff",
     }
 
     @staticmethod
