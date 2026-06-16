@@ -835,7 +835,7 @@ class IndeXarApp:
         if self._file_tags_collapsed:
             return
         d = self._tags_drag
-        dy = event.y_root - d["y"]
+        dy = d["y"] - event.y_root
         new_h = d["start_h"] + dy
         new_h = max(60, new_h)
         self._file_tags_height = new_h
