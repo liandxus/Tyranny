@@ -781,22 +781,20 @@ class IndeXarApp:
 
     def _build_file_tags_section(self, parent, prefix, pack_side=None):
         """在 parent 中创建'当前文件标签'区块，设置 self.{prefix}_tags_* 属性。
-        pack_side: 容器在 parent 中的 pack side（如 tk.BOTTOM 用于标签页）
-        分隔条放在 container 外部（parent 中），拖动时控制 container 高度。"""
+        pack_side: 容器在 parent 中的 pack side（如 tk.BOTTOM 用于标签页）"""
 
-        # ── 外层容器（标签面板本体）──
+        # ── 外层容器 ──
         container = tk.Frame(parent, bd=0, highlightthickness=0,
                              height=self._file_tags_height)
         container.pack(fill=tk.X, side=pack_side if pack_side else tk.TOP)
         container.pack_propagate(False)
         setattr(self, f"{prefix}tags_container", container)
 
-        # ── 可拖动分隔条（container 外部，父容器中紧随 container 之后）──
-        sep = tk.Frame(parent, height=4, cursor="sb_v_double_arrow")
-        sep.pack(fill=tk.X, side=pack_side if pack_side else tk.TOP)
+        # ── 可拖动分隔条 ──
+        sep = tk.Frame(container, height=4, cursor="sb_v_double_arrow")
+        sep.pack(fill=tk.X)
         sep.bind("<Button-1>", lambda e: self._start_tags_drag(e, prefix))
         sep.bind("<B1-Motion>", lambda e: self._do_tags_drag(e, prefix))
-        sep.bind("<Double-Button-1>", lambda e: self._toggle_file_tags())
         setattr(self, f"{prefix}tags_sep", sep)
 
         header = tk.Label(container,
@@ -827,30 +825,34 @@ class IndeXarApp:
 
     def _start_tags_drag(self, event, prefix):
         ctr = getattr(self, f"{prefix}tags_container")
+        parent = ctr.master
         self._tags_drag = {
             "y": event.y_root,
             "start_h": ctr.winfo_height(),
+            "parent_h": parent.winfo_height(),
+            "min_upper": 120 if prefix == "file_" else 160,
         }
 
     def _do_tags_drag(self, event, prefix):
         if self._file_tags_collapsed:
             return
         d = self._tags_drag
-        dy = event.y_root - d["y"]
+        dy = d["y"] - event.y_root
         new_h = d["start_h"] + dy
-        new_h = max(60, new_h)
+        lower_max = d["parent_h"] - d["min_upper"]
+        new_h = max(60, min(lower_max, new_h))
         self._file_tags_height = new_h
         for p in ("file_", "tag_"):
             ctr = getattr(self, f"{p}tags_container", None)
             if ctr:
                 ctr.configure(height=new_h)
-        self._schedule_save_settings()
+        self._save_settings()
 
     def _toggle_file_tags(self):
         """折叠/展开所有'当前文件标签'区块"""
         self._file_tags_collapsed = not self._file_tags_collapsed
         self._apply_file_tags_visibility()
-        self._schedule_save_settings()
+        self._save_settings()
 
     def _apply_file_tags_visibility(self):
         """根据共享折叠状态更新当前可见区块的外观"""
@@ -858,18 +860,20 @@ class IndeXarApp:
         for prefix in ("file_", "tag_"):
             header = getattr(self, f"{prefix}tags_header", None)
             body = getattr(self, f"{prefix}tags_body", None)
-            container = getattr(self, f"{prefix}tags_container", None)
+            ctr = getattr(self, f"{prefix}tags_container", None)
             if header:
                 header.configure(text=f"{arrow} 当前文件标签")
             if body:
                 if self._file_tags_collapsed:
                     body.pack_forget()
-                    if container:
-                        container.configure(height=30)
                 else:
                     body.pack(fill=tk.BOTH, expand=True)
-                    if container:
-                        container.configure(height=self._file_tags_height)
+            # 折叠时容器缩小到只够放标题，展开时恢复记忆高度
+            if ctr:
+                if self._file_tags_collapsed:
+                    ctr.configure(height=28)
+                else:
+                    ctr.configure(height=self._file_tags_height)
 
     def _refresh_file_tags(self):
         """刷新两个页面的'当前文件标签'列表"""
@@ -2825,12 +2829,6 @@ class IndeXarApp:
                         ctr.configure(height=self._file_tags_height)
         except (json.JSONDecodeError, IOError, ValueError):
             pass  # 配置文件损坏时使用默认值
-
-    def _schedule_save_settings(self):
-        """防抖保存：拖拽过程中不频繁写盘"""
-        if hasattr(self, '_save_timer'):
-            self.root.after_cancel(self._save_timer)
-        self._save_timer = self.root.after(200, self._save_settings)
 
     def _save_settings(self):
         """将当前配置写入 settings.json"""
