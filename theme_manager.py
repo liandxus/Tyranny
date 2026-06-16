@@ -21,7 +21,7 @@ class VSCodeTheme:
         "nav_bg": "#2c2c2c",
         "nav_fg": "#858585",
         "nav_active_fg": "#ffffff",
-        "nav_hover_bg": "#3c3c3c",
+        "nav_hover_bg": "#484848",
 
         "sidebar_bg": "#e8e8e8",
         "sidebar_fg": "#333333",
@@ -29,6 +29,10 @@ class VSCodeTheme:
         "sidebar_header_fg": "#555555",
         "sidebar_item_selected": "#d0d0d0",
         "sidebar_item_hover": "#dadada",
+
+        "menu_bg": "#ffffff",
+        "menu_fg": "#333333",
+        "menu_hover": "#e8e8e8",
 
         "content_bg": "#ffffff",
         "content_fg": "#212529",
@@ -45,10 +49,12 @@ class VSCodeTheme:
         "tree_fg": "#333333",
         "tree_sel_bg": "#d0d0d0",
         "tree_sel_fg": "#333333",
+        "tree_hover_bg": "#dcdcdc",
 
         "scroll_bg": "#e8e8e8",
         "scroll_trough": "#e8e8e8",
-        "scroll_thumb": "#c8c8c8",
+        "scroll_thumb": "#808080",
+        "scroll_arrow": "#666666",
 
         "selection_bg": "#cce8ff",
         "selection_fg": "#212529",
@@ -70,13 +76,17 @@ class VSCodeTheme:
         "nav_bg": "#333333",
         "nav_fg": "#858585",
         "nav_active_fg": "#ffffff",
-        "nav_hover_bg": "#404040",
+        "nav_hover_bg": "#505050",
 
         "sidebar_bg": "#252526",
         "sidebar_fg": "#cccccc",
         "sidebar_header_bg": "#2d2d2d",
         "sidebar_header_fg": "#999999",
         "sidebar_item_selected": "#37373d",
+
+        "menu_bg": "#333333",
+        "menu_fg": "#cccccc",
+        "menu_hover": "#3c3c3c",
         "sidebar_item_hover": "#2a2d2e",
 
         "content_bg": "#1e1e1e",
@@ -94,10 +104,12 @@ class VSCodeTheme:
         "tree_fg": "#cccccc",
         "tree_sel_bg": "#37373d",
         "tree_sel_fg": "#ffffff",
+        "tree_hover_bg": "#2e2e30",
 
         "scroll_bg": "#252526",
         "scroll_trough": "#252526",
-        "scroll_thumb": "#424242",
+        "scroll_thumb": "#666666",
+        "scroll_arrow": "#aaaaaa",
 
         "selection_bg": "#264f78",
         "selection_fg": "#ffffff",

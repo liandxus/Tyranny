@@ -4,16 +4,39 @@ VS Code 风格 + 自定义无边框标题栏 + 亮/暗主题切换
 """
 
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 import ctypes
+import json
+import os
 import re
-from ttkbootstrap import Style
-from file_handler import list_notes, list_notes_tree, read_note
+from file_handler import list_notes, list_notes_tree, read_note, get_tag_index, build_tag_index
 from theme_manager import VSCodeTheme
 import icon_renderer
+from context_menu import ContextMenu
+
+SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "settings.json")
+
+
+def _add_hover_bg(widget, normal_bg, hover_bg, debug=False):
+    """为 tk.Button/Label 添加 hover 背景色效果。
+    主题切换时直接更新 widget._nb_normal_bg / widget._nb_hover_bg 即可。
+    """
+    widget._nb_hover_bg = hover_bg
+    widget._nb_normal_bg = normal_bg
+    if debug:
+        widget.bind("<Enter>", lambda e: (
+            print(f"[HOVER ENTER] {widget}, bg={e.widget._nb_hover_bg}"),
+            e.widget.configure(bg=e.widget._nb_hover_bg)))
+        widget.bind("<Leave>", lambda e: (
+            print(f"[HOVER LEAVE] {widget}"),
+            e.widget.configure(bg=e.widget._nb_normal_bg)))
+    else:
+        widget.bind("<Enter>", lambda e: e.widget.configure(bg=e.widget._nb_hover_bg))
+        widget.bind("<Leave>", lambda e: e.widget.configure(bg=e.widget._nb_normal_bg))
+
 
 # ── 窗口拖拽 / 调整大小的阈值（像素） ──
-RESIZE_EDGE = 10
+RESIZE_EDGE = 8
 
 
 class IndeXarApp:
@@ -25,20 +48,24 @@ class IndeXarApp:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("IndeXar")
-        # 窗口居中启动
+
+        # ── 移除任务栏图标（默认 Tk 图标比黑块好，暂保留）──
+
+        # ── 移除原生标题栏（必须先设，否则位置会偏移）──
+        self.root.overrideredirect(True)
+
+        # 窗口居中
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
         cx, cy = (sw - 1100) // 2, (sh - 680) // 2
         self.root.geometry(f"1100x680+{cx}+{cy}")
         self.root.minsize(800, 500)
 
-        # ── 移除原生标题栏 ──
-        self.root.overrideredirect(True)
-
         # 主题状态
         self.theme_mode = "light"
         self.colors = VSCodeTheme.get(self.theme_mode)
-        self.style = Style(theme="journal")
+        self.style = ttk.Style()
+        self.style.theme_use("clam")
 
         # 窗口状态
         self._drag_data = {"x": 0, "y": 0}
@@ -49,10 +76,39 @@ class IndeXarApp:
 
         # 当前面板
         self.current_panel = "files"
+        self._current_note_path = None
+
+        # 字号
+        self._font_size = 11
+        self._font_step = 1
+
+        # 跟随系统主题
+        self._follow_system_theme = False
+        self._theme_overridden = False
+
+        # 当前文件标签共享状态
+        self._file_tags_collapsed = False
+        self._selected_file_tag = None
+        self._file_tags_height = 88
 
         # 构建界面
         self._build_layout()
+
+        # 加载持久化设置（覆盖默认值，必须在 _build_layout 之后，因为侧栏宽度需要 side_frame 存在）
+        self._load_settings()
+
+        # 如果开启了跟随系统主题，以系统主题覆盖上次手动设置的主题
+        if self._follow_system_theme:
+            sys_theme = self._read_system_theme()
+            if sys_theme != self.theme_mode:
+                self.theme_mode = sys_theme
+
+        self.colors = VSCodeTheme.get(self.theme_mode)
         self._apply_theme()
+
+        # overrideredirect 窗口首次设置 geometry 可能不生效，延迟再设一次
+        self.root.after(50, lambda: self.root.geometry(
+            f"1100x680+{cx}+{cy}"))
 
         # ── 绑定窗口调整大小 ──
         self.root.bind("<Button-1>", self._start_resize, add="+")
@@ -60,6 +116,10 @@ class IndeXarApp:
         self.root.bind("<ButtonRelease-1>", self._end_resize, add="+")
         self.root.bind("<Motion>", self._update_cursor, add="+")
         self.root.bind("<Leave>", lambda e: self.root.config(cursor=""), add="+")
+
+        # 内容区鼠标事件（检测 wikilink 交互）
+        self.content_text.bind("<ButtonRelease-1>", self._on_content_click)
+        self.content_text.bind("<Motion>", self._on_content_motion)
 
         # Windows 原生窗口管理（Aero Snap + 双击最大化/还原）
         self.root.after(200, self._fix_alt_tab)
@@ -75,24 +135,33 @@ class IndeXarApp:
         self._build_titlebar()
 
         # ─── 主体 ───
-        body = tk.Frame(self.root)
-        body.pack(fill=tk.BOTH, expand=True)
+        self.body = tk.Frame(self.root)
+        self.body.pack(fill=tk.BOTH, expand=True)
 
         # 活动栏（左侧窄条）
-        self.nav = tk.Frame(body, width=48)
+        self.nav = tk.Frame(self.body, width=48)
         self.nav.pack(side=tk.LEFT, fill=tk.Y)
         self.nav.pack_propagate(False)
         self._build_nav_widgets()
 
         # 侧栏面板
-        self.side_frame = tk.Frame(body, width=210)
+        self._sidebar_width = 240
+        self.side_frame = tk.Frame(self.body, width=240)
         self.side_frame.pack(side=tk.LEFT, fill=tk.Y)
         self.side_frame.pack_propagate(False)
         self._build_file_tree_panel()
         self._build_tag_panel()
 
+        # ── 可拖动分隔条 ──
+        self._grip = tk.Frame(self.body, width=4, cursor="sb_h_double_arrow")
+        self._grip.pack(side=tk.LEFT, fill=tk.Y)
+        self._grip.pack_propagate(False)
+        self._grip.bind("<Button-1>", self._start_sidebar_drag)
+        self._grip.bind("<B1-Motion>", self._do_sidebar_drag)
+        self._grip.bind("<ButtonRelease-1>", self._end_sidebar_drag)
+
         # 内容区
-        self._build_content_area(body)
+        self._build_content_area(self.body)
 
         # ─── 状态栏 ───
         self.statusbar = tk.Frame(self.root, height=22)
@@ -112,13 +181,38 @@ class IndeXarApp:
         bar.pack_propagate(False)
         self.titlebar = bar
 
-        # 应用图标 / 标题
-        self.title_label = tk.Label(
-            bar, text="📁  IndeXar",
-            font=("Microsoft YaHei", 10),
-            padx=12,
-        )
-        self.title_label.pack(side=tk.LEFT)
+        # ── 应用图标 ──（后续替换: self._logo_img = icon_renderer.svg_icon("logo.svg", ...)）
+        self._logo_img = None  # 占位
+        self.title_icon = tk.Label(bar, text="📁", font=("Segoe UI", 11),
+                                   padx=12, pady=2)
+        self.title_icon.pack(side=tk.LEFT)
+
+        # ── 菜单栏 ──
+        self._menu_labels = []  # 用于拖拽绑定
+        self._menu_defs = [
+            ("文件", [
+                ("新建笔记", self._create_note),
+                ("新建文件夹", self._create_folder),
+                None,
+                ("退出", self._on_close),
+            ]),
+            ("编辑", [
+                ("刷新文件树", self._refresh_file_tree),
+                ("在资源管理器中打开", self._open_in_explorer),
+            ]),
+            ("视图", self._get_view_menu_items),
+        ]
+        for name, items in self._menu_defs:
+            lbl = tk.Label(bar, text=name,
+                          font=("Segoe UI", 10),
+                          padx=10, pady=1,
+                          fg=self.colors["toolbar_fg"],
+                          cursor="hand2")
+            lbl.pack(side=tk.LEFT)
+            lbl.bind("<Button-1>", lambda e, i=items: self._show_title_menu(e, i))
+            _add_hover_bg(lbl, self.colors["toolbar_bg"],
+                         self.colors["toolbar_btn_hover"])
+            self._menu_labels.append(lbl)
 
         # 窗口控制按钮
         btn_frame = tk.Frame(bar)
@@ -140,12 +234,21 @@ class IndeXarApp:
 
         self.close_btn = self._make_title_btn(
             btn_frame, "✕", btn_size,
-            self.root.destroy,
+            self._on_close,
         )
         self.close_btn.pack(side=tk.LEFT, padx=0, fill=tk.Y)
 
-        # ── 拖拽绑定 ──
-        for widget in (bar, self.title_label):
+        # ── 按钮 hover 效果 ──
+        _add_hover_bg(self.min_btn,
+                      self.colors["toolbar_bg"], self.colors["toolbar_btn_hover"])
+        _add_hover_bg(self.max_btn,
+                      self.colors["toolbar_bg"], self.colors["toolbar_btn_hover"])
+        _close_hover = "#e81123" if self.theme_mode == "light" else "#c03333"
+        _add_hover_bg(self.close_btn,
+                      self.colors["toolbar_bg"], _close_hover)
+
+        # ── 拖拽绑定（菜单项本身不参与拖拽，避免和点击菜单冲突）──
+        for widget in (bar, self.title_icon):
             widget.bind("<Button-1>", self._start_drag)
             widget.bind("<B1-Motion>", self._do_drag)
             widget.bind("<Double-Button-1>",
@@ -177,7 +280,7 @@ class IndeXarApp:
             bg=self.colors["nav_bg"],
             cursor="hand2",
         )
-        self.nav_files_btn.pack(side=tk.TOP, fill=tk.X, pady=(10, 0))
+        self.nav_files_btn.pack(pady=(10, 0))
         self.nav_files_btn.bind("<Button-1>", lambda e: self._show_files())
 
         self._nav_tags_img = icon_renderer.tag_icon(
@@ -188,73 +291,648 @@ class IndeXarApp:
             bg=self.colors["nav_bg"],
             cursor="hand2",
         )
-        self.nav_tags_btn.pack(side=tk.TOP, fill=tk.X, pady=(6, 0))
+        self.nav_tags_btn.pack(pady=(6, 0))
         self.nav_tags_btn.bind("<Button-1>", lambda e: self._show_tags())
+
+        # ── hover 效果 ──
+        _add_hover_bg(self.nav_files_btn,
+                      self.colors["nav_bg"], self.colors["nav_hover_bg"])
+        _add_hover_bg(self.nav_tags_btn,
+                      self.colors["nav_bg"], self.colors["nav_hover_bg"])
 
     # ── 侧栏面板 ──
 
     def _build_file_tree_panel(self):
         """文件树"""
         self.file_tree_frame = tk.Frame(self.side_frame)
+        # 头部行：笔记列表标题 + 并排新建按钮
+        self._tree_header_frame = tk.Frame(self.file_tree_frame)
+        self._tree_header_frame.pack(fill=tk.X)
         self.side_header = tk.Label(
-            self.file_tree_frame,
+            self._tree_header_frame,
             text="   笔记列表",
             font=("Microsoft YaHei", 10),
             anchor=tk.W, padx=8, pady=6,
         )
-        self.side_header.pack(fill=tk.X)
+        self.side_header.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        tree_frame = tk.Frame(self.file_tree_frame)
-        tree_frame.pack(fill=tk.BOTH, expand=True)
+        # 新建文件夹 + 新建笔记，并排放在右侧（如 VS Code）
+        self._new_folder_img = icon_renderer.folder_plus_icon(
+            self.colors["sidebar_header_fg"]
+        )
+        self.new_folder_btn = tk.Button(
+            self._tree_header_frame,
+            image=self._new_folder_img,
+            cursor="hand2",
+            relief=tk.FLAT, bd=0, highlightthickness=0,
+            padx=4, pady=0,
+        )
+        self.new_folder_btn.pack(side=tk.RIGHT, padx=(0, 8))
+        self.new_folder_btn.config(
+            command=lambda: self._create_folder(
+                default_dir=self._get_tree_context_dir()))
 
-        self.tree = ttk.Treeview(tree_frame, show="tree", selectmode="browse")
-        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._new_note_img = icon_renderer.file_icon(
+            self.colors["sidebar_header_fg"]
+        )
+        self.new_note_btn = tk.Button(
+            self._tree_header_frame,
+            image=self._new_note_img,
+            cursor="hand2",
+            relief=tk.FLAT, bd=0, highlightthickness=0,
+            padx=4, pady=0,
+        )
+        self.new_note_btn.pack(side=tk.RIGHT, padx=(0, 4))
+        self.new_note_btn.config(
+            command=lambda: self._create_note(
+                default_dir=self._get_tree_context_dir()))
+
+        # ── hover 效果 ──
+        _add_hover_bg(self.new_folder_btn,
+                      self.colors["sidebar_header_bg"],
+                      self.colors["sidebar_item_selected"])
+        _add_hover_bg(self.new_note_btn,
+                      self.colors["sidebar_header_bg"],
+                      self.colors["sidebar_item_selected"])
+
+        self.tree_container = tk.Frame(self.file_tree_frame)
+        self.tree_container.pack(fill=tk.BOTH, expand=True)
 
         self.tree_scroll = ttk.Scrollbar(
-            tree_frame, orient=tk.VERTICAL, command=self.tree.yview,
+            self.tree_container, orient=tk.VERTICAL,
         )
         self.tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.tree = ttk.Treeview(self.tree_container, show="tree", selectmode="browse")
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.tree_scroll.configure(command=self.tree.yview)
         self.tree.configure(yscrollcommand=self.tree_scroll.set)
         self.tree.bind("<<TreeviewSelect>>", self._on_file_selected)
 
+        # ── 文件树行悬停高亮 ──
+        self.tree.bind("<Motion>", self._on_tree_motion)
+        self.tree.bind("<Leave>", self._on_tree_leave)
+
+        # ── 当前文件标签（共享组件）──
+        self._build_file_tags_section(self.file_tree_frame, "file_")
+
+        # 右键菜单
+        self._build_tree_context_menu()
+
+    def _build_tree_context_menu(self):
+        """文件树右键菜单（自定义无边框菜单）"""
+        self.tree_menu = ContextMenu(self.root, colors={
+            "bg": self.colors["sidebar_bg"],
+            "fg": self.colors["sidebar_fg"],
+            "activebackground": self.colors["sidebar_item_selected"],
+            "activeforeground": self.colors["sidebar_fg"],
+            "separator": self.colors.get("separator", "#d0d0d0"),
+        })
+        self._tree_menu_items = [
+            ("新建笔记", self._tree_context_new),
+            ("新建文件夹", self._tree_context_new_folder),
+            None,  # separator
+            ("重命名", self._tree_context_rename),
+            ("删除", self._tree_context_delete),
+            None,  # separator
+            ("在资源管理器中打开", self._tree_context_reveal),
+        ]
+        self.tree.bind("<Button-3>", self._show_tree_menu)
+
+    def _on_tree_motion(self, event):
+        """文件树行鼠标悬停 → 高亮"""
+        iid = self.tree.identify_row(event.y)
+        prev = getattr(self, '_tree_hover_item', None)
+        if prev and prev != iid:
+            try:
+                self.tree.item(prev, tags=())
+            except tk.TclError:
+                pass
+        if iid:
+            self.tree.item(iid, tags=('hover',))
+            self._tree_hover_item = iid
+        else:
+            self._tree_hover_item = None
+
+    def _on_tree_leave(self, event):
+        """鼠标离开文件树 → 清除悬停高亮"""
+        prev = getattr(self, '_tree_hover_item', None)
+        if prev:
+            try:
+                self.tree.item(prev, tags=())
+            except tk.TclError:
+                pass
+            self._tree_hover_item = None
+
+    def _show_title_menu(self, event, items):
+        """标题栏菜单点击 → 下拉"""
+        x = event.widget.winfo_rootx() - 4  # 略向左偏移
+        y = event.widget.winfo_rooty() + event.widget.winfo_height() + 2
+        menu = ContextMenu(self.root, colors=self._get_menu_colors())
+        if callable(items):
+            items = items()
+        menu.show(x, y, items, use_grab=False)
+
+    def _open_in_explorer(self):
+        import subprocess
+        from file_handler import DATA_DIR
+        subprocess.run(["explorer", os.path.normpath(DATA_DIR)])
+
+    def _get_menu_colors(self):
+        return {
+            "bg": self.colors["menu_bg"],
+            "fg": self.colors["menu_fg"],
+            "activebackground": self.colors["menu_hover"],
+            "activeforeground": self.colors["menu_fg"],
+            "separator": self.colors.get("separator", "#d0d0d0"),
+        }
+
+    def _show_tree_menu(self, event):
+        """右键点击树节点时显示自定义菜单（根据文件/文件夹动态切换）"""
+        iid = self.tree.identify_row(event.y)
+        # 设置标志防止 _on_file_selected 误触发文件夹 toggle
+        self._right_clicking = True
+
+        if iid:
+            self.tree.selection_set(iid)
+            vals = self.tree.item(iid, "values")
+            is_dir = vals and (vals[1] == "True" or vals[1] is True)
+            if is_dir:
+                items = [
+                    ("新建笔记", self._tree_context_new),
+                    ("新建文件夹", self._tree_context_new_folder),
+                    None,
+                    ("重命名文件夹", self._tree_context_rename),
+                    ("删除文件夹", self._tree_context_delete),
+                    None,
+                    ("在资源管理器中打开", self._tree_context_reveal),
+                ]
+            else:
+                items = [
+                    ("新建笔记", self._tree_context_new),
+                    ("新建文件夹", self._tree_context_new_folder),
+                    None,
+                    ("重命名", self._tree_context_rename),
+                    ("删除", self._tree_context_delete),
+                    None,
+                    ("在资源管理器中打开", self._tree_context_reveal),
+                ]
+        else:
+            # 点在空白区域 → 清空选中，仅提供新建
+            self.tree.selection_set(())
+            items = [
+                ("新建笔记", self._tree_context_new),
+                ("新建文件夹", self._tree_context_new_folder),
+            ]
+
+        # 每次显示菜单都传入当前主题色（保证主题切换后颜色即时更新）
+        # use_grab=False 避免和新创建对话框的 grab 冲突导致卡死
+        self.tree_menu.show(
+            event.x_root, event.y_root, items,
+            colors_override={
+                "bg": self.colors["menu_bg"],
+                "fg": self.colors["menu_fg"],
+                "activebackground": self.colors["menu_hover"],
+                "activeforeground": self.colors["menu_fg"],
+                "separator": self.colors.get("separator", "#d0d0d0"),
+            },
+            use_grab=False)
+
+    def _get_tree_context_dir(self):
+        """返回右键选中项所在的目录路径（相对路径）"""
+        sel = self.tree.selection()
+        if not sel:
+            return ""
+        vals = self.tree.item(sel[0], "values")
+        if not vals:
+            return ""
+        iid, is_dir = vals[0], vals[1]
+        if is_dir == "True" or is_dir is True:
+            return iid  # 选中了文件夹，直接用它
+        else:
+            # 选中了文件，取其所在目录
+            parts = iid.rsplit("/", 1)
+            return parts[0] if len(parts) > 1 else ""
+
+    def _tree_context_new(self):
+        """右键 → 新建笔记"""
+        self._create_note(default_dir=self._get_tree_context_dir())
+
+    def _tree_context_new_folder(self):
+        """右键 → 新建文件夹"""
+        from file_handler import make_subdir
+        parent = self._get_tree_context_dir()
+
+        dialog = self._make_dialog(self.root, "新建文件夹", 380, 180)
+
+        frame = tk.Frame(dialog, padx=20, pady=16)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        hint = f"在 {(parent or '根目录')} 下新建："
+        tk.Label(frame, text=hint, anchor=tk.W,
+                 font=("Microsoft YaHei", 10)).pack(fill=tk.X, pady=(0, 8))
+        name_var = tk.StringVar(value="new_folder")
+        entry = tk.Entry(frame, textvariable=name_var,
+                          font=("Microsoft YaHei", 10))
+        entry.pack(fill=tk.X, pady=(0, 12))
+        entry.select_range(0, tk.END)
+        entry.focus_set()
+
+        btn_frame = tk.Frame(frame)
+        btn_frame.pack(fill=tk.X)
+        tk.Button(btn_frame, text="取消", font=("Microsoft YaHei", 9),
+                  command=dialog.destroy).pack(side=tk.RIGHT, padx=(10, 0))
+
+        def do_create():
+            name = name_var.get().strip()
+            if name:
+                make_subdir(parent, name)
+                dialog.destroy()
+                self._refresh_file_tree()
+
+        tk.Button(btn_frame, text="创建", font=("Microsoft YaHei", 9),
+                  command=do_create).pack(side=tk.RIGHT)
+        entry.bind("<Return>", lambda e: do_create())
+        self._theme_dialog_body(dialog)
+
+    def _tree_context_rename(self):
+        """右键 → 重命名（文件/文件夹）"""
+        sel = self.tree.selection()
+        if not sel:
+            return
+        vals = self.tree.item(sel[0], "values")
+        if not vals:
+            return
+        iid, is_dir = vals[0], vals[1]
+        is_dir = (is_dir == "True" or is_dir is True)
+        from file_handler import rename_note, rename_folder
+
+        old_name = os.path.basename(iid)
+        item_type = "文件夹" if is_dir else "笔记"
+
+        dialog = self._make_dialog(self.root, f"重命名{item_type}", 380, 180)
+
+        frame = tk.Frame(dialog, padx=20, pady=16)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        tk.Label(frame, text=f"重命名 {item_type}：{old_name}", anchor=tk.W,
+                 font=("Microsoft YaHei", 10)).pack(fill=tk.X, pady=(0, 8))
+        name_var = tk.StringVar(value=old_name)
+        entry = tk.Entry(frame, textvariable=name_var,
+                          font=("Microsoft YaHei", 10))
+        entry.pack(fill=tk.X, pady=(0, 12))
+        entry.select_range(0, tk.END)
+        entry.focus_set()
+
+        btn_frame = tk.Frame(frame)
+        btn_frame.pack(fill=tk.X)
+        tk.Button(btn_frame, text="取消", font=("Microsoft YaHei", 9),
+                  command=dialog.destroy).pack(side=tk.RIGHT, padx=(10, 0))
+
+        def do_rename():
+            new_name = name_var.get().strip()
+            if new_name and new_name != old_name:
+                if is_dir:
+                    rename_folder(iid, new_name)
+                else:
+                    rename_note(iid, new_name)
+                dialog.destroy()
+                self._refresh_file_tree()
+
+        tk.Button(btn_frame, text="确认", font=("Microsoft YaHei", 9),
+                  command=do_rename).pack(side=tk.RIGHT)
+        entry.bind("<Return>", lambda e: do_rename())
+        self._theme_dialog_body(dialog)
+
+    def _tree_context_delete(self):
+        """右键 → 删除（文件/文件夹）"""
+        sel = self.tree.selection()
+        if not sel:
+            return
+        vals = self.tree.item(sel[0], "values")
+        if not vals:
+            return
+        iid, is_dir = vals[0], vals[1]
+        is_dir = (is_dir == "True" or is_dir is True)
+
+        name = os.path.basename(iid)
+        item_type = "文件夹" if is_dir else "笔记"
+        if is_dir:
+            msg = f"确定删除文件夹「{name}」及其所有内容？\n此操作不可撤销。"
+        else:
+            msg = f"确定删除笔记「{name}」？\n此操作不可撤销。"
+
+        confirm = messagebox.askyesno(f"确认删除{item_type}", msg)
+        if confirm:
+            if is_dir:
+                from file_handler import delete_folder
+                delete_folder(iid)
+            else:
+                from file_handler import delete_note
+                delete_note(iid)
+            self._refresh_file_tree()
+            self._set_content("")
+
+    def _tree_context_reveal(self):
+        """右键 → 在资源管理器中打开"""
+        sel = self.tree.selection()
+        if not sel:
+            return
+        vals = self.tree.item(sel[0], "values")
+        if not vals:
+            return
+        iid, is_dir = vals[0], vals[1]
+        from file_handler import DATA_DIR
+        if is_dir == "True" or is_dir is True:
+            target = os.path.join(DATA_DIR, iid)
+        else:
+            target = os.path.join(DATA_DIR, f"{iid}.md")
+        if os.path.exists(target):
+            import subprocess
+            subprocess.run(["explorer", "/select,", os.path.normpath(target)])
+
     def _build_tag_panel(self):
-        """标签面板"""
+        """标签面板：可折叠的两个区块 —— 所有标签 + 当前文件标签"""
         self.tag_frame = tk.Frame(self.side_frame)
-        self.tag_header = tk.Label(
-            self.tag_frame,
-            text="   标签列表",
+
+        # ── 辅助：创建可折叠区块 ──
+        def _make_section(parent, title_text, expand=True):
+            """返回 (header_label, body_frame)，header 点击折叠/展开 body"""
+            header = tk.Label(
+                parent,
+                text=f"▼ {title_text}",
+                font=("Microsoft YaHei", 9),
+                anchor=tk.W, padx=4, pady=4,
+                cursor="hand2",
+            )
+            header.pack(fill=tk.X)
+            body = tk.Frame(parent, bd=0, highlightthickness=0)
+            body.pack(fill=tk.BOTH, expand=expand)
+            body._collapsed = False
+            body._expand = expand
+
+            def toggle():
+                if body._collapsed:
+                    body.pack(fill=tk.BOTH, expand=body._expand,
+                              before=body._next_widget if hasattr(body, '_next_widget') else None)
+                    header.configure(text=header.cget("text").replace("▶", "▼"))
+                    body._collapsed = False
+                else:
+                    body.pack_forget()
+                    header.configure(text=header.cget("text").replace("▼", "▶"))
+                    body._collapsed = True
+
+            header.bind("<Button-1>", lambda e: toggle())
+            return header, body
+
+        # ── 区块1：所有标签 ──
+        self.section_all_header, self.section_all_body = _make_section(
+            self.tag_frame, "所有标签", expand=True)
+
+        # 搜索框
+        self.tag_search_var = tk.StringVar()
+        self.tag_search_var.trace_add("write", lambda *a: self._on_tag_search())
+        self.tag_search_entry = tk.Entry(
+            self.section_all_body,
+            textvariable=self.tag_search_var,
             font=("Microsoft YaHei", 10),
-            anchor=tk.W, padx=8, pady=6,
+            relief=tk.FLAT, bd=0,
+            highlightthickness=1,
         )
-        self.tag_header.pack(fill=tk.X)
+        self.tag_search_entry.pack(fill=tk.X, padx=8, pady=(4, 2))
+        self.tag_search_entry.bind("<Escape>", lambda e: (
+            self.tag_search_var.set(""),
+            self._refresh_tags(),
+        ))
+        self._tag_search_placeholder = "搜索标签..."
+        self.tag_search_entry.insert(0, self._tag_search_placeholder)
+        self.tag_search_entry.configure(fg="#999")
+        self.tag_search_entry.bind("<FocusIn>", self._on_tag_search_focus_in)
+        self.tag_search_entry.bind("<FocusOut>", self._on_tag_search_focus_out)
 
-        tag_frame = tk.Frame(self.tag_frame)
-        tag_frame.pack(fill=tk.BOTH, expand=True)
-
-        self.tag_listbox = tk.Listbox(
-            tag_frame,
-            font=("Microsoft YaHei", 10),
-            relief=tk.FLAT, highlightthickness=0,
-            borderwidth=0, activestyle="none",
+        # 交集提示
+        self.tag_intersection_label = tk.Label(
+            self.section_all_body,
+            text="",
+            font=("Microsoft YaHei", 8),
+            anchor=tk.W, padx=10, pady=1,
         )
-        self.tag_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.tag_intersection_label.pack(fill=tk.X)
 
-        self.tag_scroll = ttk.Scrollbar(
-            tag_frame, orient=tk.VERTICAL, command=self.tag_listbox.yview,
+        # 标签/文件 Treeview
+        self.tag_tree_container = tk.Frame(self.section_all_body,
+                                           bd=0, highlightthickness=0)
+        self.tag_tree_container.pack(fill=tk.BOTH, expand=True)
+
+        self.tag_tree_scroll = ttk.Scrollbar(
+            self.tag_tree_container, orient=tk.VERTICAL,
         )
-        self.tag_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.tag_listbox.configure(yscrollcommand=self.tag_scroll.set)
-        self.tag_listbox.bind("<<ListboxSelect>>", self._on_tag_selected)
+        self.tag_tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.tag_tree = ttk.Treeview(
+            self.tag_tree_container, show="tree",
+            selectmode="extended",
+        )
+        self.tag_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.tag_tree_scroll.configure(command=self.tag_tree.yview)
+        self.tag_tree.configure(yscrollcommand=self.tag_tree_scroll.set)
+
+        self.tag_tree.bind("<<TreeviewSelect>>", self._on_tag_tree_select)
+        self.tag_tree.bind("<Double-Button-1>", self._on_tag_tree_double_click)
+        self.tag_tree.bind("<ButtonRelease-1>", self._on_tag_tree_click)
+        self.tag_tree.bind("<Motion>", self._on_tag_tree_motion)
+        self.tag_tree.bind("<Leave>", self._on_tag_tree_leave)
+
+        # ── 区块2：当前文件标签（共享组件，固定在底部）──
+        self._build_file_tags_section(self.tag_frame, "tag_",
+                                      pack_side=tk.BOTTOM)
+        self.section_all_body._next_widget = self.tag_tags_container
+
+        # 覆写"所有标签"的折叠行为：收起时将"当前文件标签"提上来贴着头
+        self.section_all_header.unbind("<Button-1>")
+        self.section_all_header.bind("<Button-1>",
+                                     lambda e: self._toggle_all_tags_section())
+
+    # ── 标签页"所有标签"折叠逻辑 ──
+
+    def _toggle_all_tags_section(self):
+        """展开/折叠'所有标签'区块，'当前文件标签'跟随移动"""
+        body = self.section_all_body
+        header = self.section_all_header
+        if body._collapsed:
+            self._expand_all_tags_section()
+        else:
+            body.pack_forget()
+            header.configure(text=header.cget("text").replace("▼", "▶"))
+            body._collapsed = True
+
+    def _expand_all_tags_section(self):
+        """展开'所有标签'，'当前文件标签'归位底部"""
+        body = self.section_all_body
+        header = self.section_all_header
+        ctr = self.tag_tags_container
+        if not body._collapsed:
+            return
+        body.pack(fill=tk.BOTH, expand=True, before=ctr)
+        header.configure(text=header.cget("text").replace("▶", "▼"))
+        body._collapsed = False
+
+    # ── 共享组件：当前文件标签区块 ──
+
+    def _build_file_tags_section(self, parent, prefix, pack_side=None):
+        """在 parent 中创建'当前文件标签'区块，设置 self.{prefix}_tags_* 属性。
+        pack_side: 容器在 parent 中的 pack side（如 tk.BOTTOM 用于标签页）"""
+
+        # ── 外层容器 ──
+        container = tk.Frame(parent, bd=0, highlightthickness=0,
+                             height=self._file_tags_height)
+        container.pack(fill=tk.X, side=pack_side if pack_side else tk.TOP)
+        container.pack_propagate(False)
+        setattr(self, f"{prefix}tags_container", container)
+
+        # ── 可拖动分隔条 ──
+        sep = tk.Frame(container, height=4, cursor="sb_v_double_arrow")
+        sep.pack(fill=tk.X)
+        sep.bind("<Button-1>", lambda e: self._start_tags_drag(e, prefix))
+        sep.bind("<B1-Motion>", lambda e: self._do_tags_drag(e, prefix))
+        setattr(self, f"{prefix}tags_sep", sep)
+
+        header = tk.Label(container,
+                          text="▼ 当前文件标签",
+                          font=("Microsoft YaHei", 9),
+                          anchor=tk.W, padx=4, pady=3,
+                          cursor="hand2")
+        header.pack(fill=tk.X)
+
+        body = tk.Frame(container, bd=0, highlightthickness=0)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        listbox = tk.Listbox(body,
+                             font=("Microsoft YaHei", 10),
+                             relief=tk.FLAT, highlightthickness=0,
+                             borderwidth=0, activestyle="none",
+                             selectmode="browse")
+        listbox.pack(fill=tk.BOTH, expand=True, padx=8)
+
+        header.bind("<Button-1>", lambda e: self._toggle_file_tags())
+        listbox.bind("<Double-Button-1>", self._on_file_tag_dclick)
+
+        setattr(self, f"{prefix}tags_header", header)
+        setattr(self, f"{prefix}tags_body", body)
+        setattr(self, f"{prefix}tags_listbox", listbox)
+
+    # ── 拖拽调整标签区块高度 ──
+
+    def _start_tags_drag(self, event, prefix):
+        ctr = getattr(self, f"{prefix}tags_container")
+        self._tags_drag = {
+            "y": event.y_root,
+            "start_h": ctr.winfo_height(),
+            "parent_h": ctr.master.winfo_height(),
+        }
+
+    def _do_tags_drag(self, event, prefix):
+        if self._file_tags_collapsed:
+            return
+        d = self._tags_drag
+        dy = d["y"] - event.y_root
+        new_h = d["start_h"] + dy
+        new_h = max(50, min(int(d["parent_h"] * 0.8), new_h))
+        self._file_tags_height = new_h
+        for p in ("file_", "tag_"):
+            ctr = getattr(self, f"{p}tags_container", None)
+            if ctr:
+                ctr.configure(height=new_h)
+        self._save_settings()
+
+    def _toggle_file_tags(self):
+        """折叠/展开所有'当前文件标签'区块"""
+        self._file_tags_collapsed = not self._file_tags_collapsed
+        self._apply_file_tags_visibility()
+        self._save_settings()
+
+    def _apply_file_tags_visibility(self):
+        """根据共享折叠状态更新当前可见区块的外观"""
+        arrow = "▶" if self._file_tags_collapsed else "▼"
+        for prefix in ("file_", "tag_"):
+            header = getattr(self, f"{prefix}tags_header", None)
+            body = getattr(self, f"{prefix}tags_body", None)
+            lb = getattr(self, f"{prefix}tags_listbox", None)
+            if header:
+                header.configure(text=f"{arrow} 当前文件标签")
+            if body:
+                if self._file_tags_collapsed:
+                    body.pack_forget()
+                else:
+                    body.pack(fill=tk.BOTH, expand=True)
+
+    def _refresh_file_tags(self):
+        """刷新两个页面的'当前文件标签'列表"""
+        tags = []
+        if self._current_note_path:
+            from file_handler import parse_front_matter_tags, DATA_DIR
+            filepath = os.path.join(DATA_DIR, f"{self._current_note_path}.md")
+            tags = parse_front_matter_tags(filepath)
+
+        for prefix in ("file_", "tag_"):
+            lb = getattr(self, f"{prefix}tags_listbox", None)
+            if not lb:
+                continue
+            lb.delete(0, tk.END)
+            if not self._current_note_path:
+                lb.insert(tk.END, "  未打开文件")
+            elif not tags:
+                lb.insert(tk.END, "  无标签")
+            else:
+                for t in tags:
+                    lb.insert(tk.END, f"  {t}")
+            # 恢复选中状态
+            self._sync_file_tag_selection(lb)
+
+    def _on_file_tag_dclick(self, event):
+        """双击标签 → 跳转标签页定位"""
+        lb = event.widget
+        sel = lb.curselection()
+        if not sel:
+            return
+        tag_text = lb.get(sel[0]).strip()
+        if not tag_text or tag_text in ("未打开文件", "无标签"):
+            return
+
+        self._selected_file_tag = tag_text
+        for prefix in ("file_", "tag_"):
+            other_lb = getattr(self, f"{prefix}tags_listbox", None)
+            if other_lb:
+                self._sync_file_tag_selection(other_lb)
+
+        if self.current_panel != "tags":
+            self._show_tags()
+        self._expand_all_tags_section()
+        iid = f"tag_{tag_text}"
+        if self.tag_tree.exists(iid):
+            self.tag_tree.selection_set(iid)
+            self.tag_tree.see(iid)
+            self.tag_tree.item(iid, open=True)
+
+    def _sync_file_tag_selection(self, lb):
+        """同步单个 listbox 的选中状态到 self._selected_file_tag"""
+        lb.selection_clear(0, tk.END)
+        if self._selected_file_tag:
+            items = lb.get(0, tk.END)
+            for i, item in enumerate(items):
+                if item.strip() == self._selected_file_tag:
+                    lb.selection_set(i)
+                    break
 
     # ── 内容区 ──
 
     def _build_content_area(self, parent):
         """内容展示区（头部含文件名+搜索+主题切换）"""
-        right = tk.Frame(parent)
-        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.content_body = tk.Frame(parent)
+        self.content_body.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         # ── 内容头部：文件名 | 搜索 + 主题切换 ──
-        self.content_header = tk.Frame(right)
+        self.content_header = tk.Frame(self.content_body)
         self.content_header.pack(fill=tk.X)
 
         # 左侧：文件名/欢迎语
@@ -316,25 +994,63 @@ class IndeXarApp:
 
         # ── 文本内容区 ──
 
-        text_container = tk.Frame(right)
-        text_container.pack(fill=tk.BOTH, expand=True)
+        self.text_container = tk.Frame(self.content_body)
+        self.text_container.pack(fill=tk.BOTH, expand=True)
 
         self.content_text = tk.Text(
-            text_container,
+            self.text_container,
             wrap=tk.WORD,
             font=("Microsoft YaHei", 11),
             padx=20, pady=16,
             relief=tk.FLAT, highlightthickness=0,
             borderwidth=0, insertwidth=2,
         )
-        self.content_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
         self.content_scroll = ttk.Scrollbar(
-            text_container, orient=tk.VERTICAL,
-            command=self.content_text.yview,
+            self.text_container, orient=tk.VERTICAL,
         )
         self.content_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.content_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.content_scroll.configure(command=self.content_text.yview)
         self.content_text.configure(yscrollcommand=self.content_scroll.set)
+        self.content_text.configure(state=tk.DISABLED)
+
+        # 内容区右键菜单
+        self._build_content_context_menu()
+
+    # ── 内容区右键菜单 ──
+
+    def _build_content_context_menu(self):
+        """内容区右键菜单"""
+        self.content_menu = ContextMenu(self.root, colors=self._get_menu_colors())
+        self.content_text.bind("<Button-3>", self._show_content_context_menu)
+
+    def _show_content_context_menu(self, event):
+        """内容区右键 → 显示菜单"""
+        items = [
+            ("复制", self._copy_selected_text),
+            ("全选", self._select_all_text),
+        ]
+        self.content_menu.show(
+            event.x_root, event.y_root, items,
+            colors_override=self._get_menu_colors(),
+            use_grab=False)
+
+    def _copy_selected_text(self):
+        """复制选中文本到剪贴板"""
+        try:
+            text = self.content_text.selection_get()
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+        except tk.TclError:
+            pass  # 无选中内容
+
+    def _select_all_text(self):
+        """全选内容区文本（临时启用编辑）"""
+        self.content_text.configure(state=tk.NORMAL)
+        self.content_text.tag_add(tk.SEL, "1.0", tk.END)
+        self.content_text.mark_set(tk.INSERT, tk.END)
+        self.content_text.see(tk.INSERT)
         self.content_text.configure(state=tk.DISABLED)
 
     # ── 状态栏 ──
@@ -561,6 +1277,35 @@ class IndeXarApp:
         self._resize_region = ""
         self._resize_data = None
 
+    # ── 侧栏拖动调整宽度 ──
+
+    def _start_sidebar_drag(self, event):
+        self._sidebar_drag_x = event.x_root
+
+    def _do_sidebar_drag(self, event):
+        dx = event.x_root - self._sidebar_drag_x
+        new_w = self._sidebar_width + dx
+        max_w = max(300, self.root.winfo_width() // 2)
+        new_w = max(0, min(new_w, max_w))
+
+        # VSCode 风格：低于 100 直接收起，从收起状态拖出到 >20 则弹开到 180
+        MIN_OPEN = 180
+        if self._sidebar_width > 0 and new_w < 100:
+            new_w = 0
+        elif self._sidebar_width == 0 and new_w > 20:
+            new_w = MIN_OPEN
+        elif 0 < new_w < MIN_OPEN:
+            new_w = MIN_OPEN
+
+        if new_w != self._sidebar_width:
+            self._sidebar_width = new_w
+            self.side_frame.configure(width=new_w)
+            self._sidebar_drag_x = event.x_root
+
+    def _end_sidebar_drag(self, event):
+        """侧栏拖动结束 → 持久化宽度"""
+        self._save_settings()
+
     # ── Alt+Tab 修复 ──
 
     def _fix_alt_tab(self):
@@ -572,6 +1317,11 @@ class IndeXarApp:
             # 移除 WS_EX_TOOLWINDOW (0x80)，添加 WS_EX_APPWINDOW (0x40000)
             new_style = (current & ~0x80) | 0x40000
             ctypes.windll.user32.SetWindowLongW(hwnd, -20, new_style)
+            # 强制刷新窗口框架，让任务栏识别
+            ctypes.windll.user32.SetWindowPos(
+                hwnd, 0, 0, 0, 0, 0,
+                0x0002 | 0x0001 | 0x0020,  # NOMOVE | NOSIZE | FRAMECHANGED
+            )
         except Exception:
             pass
 
@@ -602,36 +1352,65 @@ class IndeXarApp:
             self._win32_original_proc = None
 
             TITLEBAR_HEIGHT = 30
-            BUTTON_AREA_WIDTH = 120  # 按钮区域大约宽度，用于排除
+            BUTTON_AREA_WIDTH = 120
+            EDGE = 8       # 上/下/左边框
+            EDGE_R = 5     # 右边框稍窄，避免和滚动条冲突
 
             @WindowProc
             def wndproc(hwnd, msg, wparam, lparam):
-                # ── WM_NCHITTEST：告诉 Windows 点击区域的类型 ──
+                # ── WM_NCHITTEST：Windows 原生边框拖拽 + 标题栏 ──
                 if msg == 0x0084:
-                    # 从 LPARAM 提取鼠标屏幕坐标
                     x = ctypes.c_int16(lparam & 0xFFFF).value
                     y = ctypes.c_int16((lparam >> 16) & 0xFFFF).value
 
-                    # 获取窗口屏幕位置
                     rect = (ctypes.c_long * 4)()
                     ctypes.windll.user32.GetWindowRect(hwnd, rect)
+                    rel_x = x - rect[0]
                     rel_y = y - rect[1]
+                    win_w = rect[2] - rect[0]
+                    win_h = rect[3] - rect[1]
 
-                    # 标题栏区域
-                    if 0 <= rel_y < TITLEBAR_HEIGHT:
+                    on_left = rel_x < EDGE
+                    on_right = rel_x > win_w - EDGE_R
+                    on_top = rel_y < EDGE
+                    on_bottom = rel_y > win_h - EDGE
+
+                    # 标题栏区域（按钮排除在外）
+                    if on_top and rel_y < TITLEBAR_HEIGHT:
                         try:
                             btn_frame = self.titlebar.winfo_children()[-1]
                             btn_left = btn_frame.winfo_rootx()
                             if x >= btn_left:
-                                return 1  # HTCLIENT → 让按钮正常点击
+                                return 1  # HTCLIENT
                         except Exception:
                             if x >= rect[2] - BUTTON_AREA_WIDTH:
                                 return 1
-                        # 最大化时：交给 tkinter 处理，用我们的手动拖拽逻辑
-                        # （这样才能让还原后跟随鼠标位置）
                         if self._is_maximized:
                             return 1  # HTCLIENT
-                        return 2  # HTCAPTION → Windows 接管拖拽/吸附
+                        return 2  # HTCAPTION
+
+                    # 四角
+                    if on_left and on_top:
+                        return 13   # HTTOPLEFT
+                    if on_right and on_top:
+                        return 14   # HTTOPRIGHT
+                    if on_left and on_bottom:
+                        return 16   # HTBOTTOMLEFT
+                    if on_right and on_bottom:
+                        return 17   # HTBOTTOMRIGHT
+                    # 四边
+                    if on_left:
+                        return 10   # HTLEFT
+                    if on_right:
+                        return 11   # HTRIGHT
+                    if on_top:
+                        return 12   # HTTOP
+                    if on_bottom:
+                        return 15   # HTBOTTOM
+
+                # ── WM_ERASEBKGND：阻止闪烁 ──
+                if msg == 0x0014:
+                    return 1  # 已自行处理背景，禁止系统擦除
 
                 # ── WM_SIZE：同步窗口状态 ──
                 if msg == 0x0005:
@@ -690,10 +1469,36 @@ class IndeXarApp:
     def _toggle_theme(self):
         """切换亮/暗主题"""
         self.theme_mode = "dark" if self.theme_mode == "light" else "light"
+        self._theme_overridden = True
+        self._save_settings()
         self.colors = VSCodeTheme.get(self.theme_mode)
+
+        # 保存展开状态
+        expanded = set()
+        def _collect(parent=""):
+            for child in self.tree.get_children(parent):
+                if self.tree.item(child, "open"):
+                    vals = self.tree.item(child, "values")
+                    if vals:
+                        expanded.add(vals[0])
+                _collect(child)
+        _collect()
+
         self._apply_theme()
+
         if self.current_panel == "files":
             self._refresh_file_tree()
+            # 恢复展开状态
+            def _restore(parent=""):
+                for child in self.tree.get_children(parent):
+                    vals = self.tree.item(child, "values")
+                    if vals and vals[0] in expanded:
+                        self.tree.item(child, open=True)
+                    _restore(child)
+            _restore()
+            # 重新渲染当前笔记（使用新主题色 + 正确的字号）
+            if self._current_note_path:
+                self._display_note(self._current_note_path)
 
     def _update_theme_toggle(self):
         """当前主题亮显，另一个灰显"""
@@ -727,7 +1532,11 @@ class IndeXarApp:
 
         # ── 标题栏 ──
         self.titlebar.configure(bg=c["toolbar_bg"])
-        self.title_label.configure(bg=c["toolbar_bg"], fg=c["toolbar_fg"])
+        self.title_icon.configure(bg=c["toolbar_bg"])
+        for lbl in self._menu_labels:
+            lbl.configure(bg=c["toolbar_bg"], fg=c["toolbar_fg"])
+            lbl._nb_normal_bg = c["toolbar_bg"]
+            lbl._nb_hover_bg = c["toolbar_btn_hover"]
         for btn in (self.min_btn, self.max_btn, self.close_btn):
             btn.configure(bg=c["toolbar_bg"], fg=c["toolbar_fg"],
                           activebackground=c["toolbar_btn_hover"])
@@ -751,49 +1560,142 @@ class IndeXarApp:
         self.nav.configure(bg=c["nav_bg"])
         self.nav_files_btn.configure(bg=c["nav_bg"])
         self.nav_tags_btn.configure(bg=c["nav_bg"])
+        # 更新 hover 颜色引用
+        self.nav_files_btn._nb_normal_bg = c["nav_bg"]
+        self.nav_files_btn._nb_hover_bg = c["nav_hover_bg"]
+        self.nav_tags_btn._nb_normal_bg = c["nav_bg"]
+        self.nav_tags_btn._nb_hover_bg = c["nav_hover_bg"]
         self._update_nav_icons()
 
         # ── 侧栏 ──
+        self.body.configure(bg=c["app_bg"], highlightbackground=c["app_bg"])
+        self._grip.configure(bg=c["sidebar_bg"], highlightbackground=c["sidebar_bg"])
         self.side_frame.configure(bg=c["sidebar_bg"])
         self.file_tree_frame.configure(bg=c["sidebar_bg"])
+        self.tree_container.configure(bg=c["sidebar_bg"], highlightbackground=c["sidebar_bg"])
         self.tag_frame.configure(bg=c["sidebar_bg"])
         self.side_header.configure(bg=c["sidebar_header_bg"], fg=c["sidebar_header_fg"])
-        self.tag_header.configure(bg=c["sidebar_header_bg"], fg=c["sidebar_header_fg"])
+        self._tree_header_frame.configure(bg=c["sidebar_header_bg"])
+        # 刷新图标颜色
+        self._new_folder_img = icon_renderer.folder_plus_icon(c["sidebar_header_fg"])
+        self._new_note_img = icon_renderer.file_icon(c["sidebar_header_fg"])
+        self.new_folder_btn.configure(
+            image=self._new_folder_img,
+            bg=c["sidebar_header_bg"],
+            activebackground=c["sidebar_header_bg"],
+        )
+        self.new_note_btn.configure(
+            image=self._new_note_img,
+            bg=c["sidebar_header_bg"],
+            activebackground=c["sidebar_header_bg"],
+        )
 
         # 文件树（ttk）
-        tree_style = "vscode.Treeview"
         self.style.configure(
-            tree_style,
+            "Treeview",
             background=c["tree_bg"], foreground=c["tree_fg"],
             fieldbackground=c["tree_bg"],
-            borderwidth=0, font=("Microsoft YaHei", 10), rowheight=26,
+            borderwidth=0, lightcolor=c["tree_bg"], darkcolor=c["tree_bg"],
+            bordercolor=c["tree_bg"],
+            font=("Microsoft YaHei", 10), rowheight=26, indent=14,
         )
-        self.style.map(tree_style,
+        self.style.map("Treeview",
                        background=[("selected", c["tree_sel_bg"])],
                        foreground=[("selected", c["tree_sel_fg"])])
-        self.tree.configure(style=tree_style)
 
-        # 滚动条（ttk）
-        scroll_style = "vscode.Vertical.TScrollbar"
+        # 文件树行悬停高亮
+        self.tree.tag_configure('hover', background=c["tree_hover_bg"])
+
+        # 标签树悬停高亮
+        self.tag_tree.tag_configure('hover', background=c["tree_hover_bg"])
+
+        # 滚动条 — VSCode 风格纯色块
         self.style.configure(
-            scroll_style,
-            background=c["scroll_thumb"], troughcolor=c["scroll_trough"],
-            bordercolor=c["scroll_trough"], arrowcolor=c["scroll_thumb"],
-            lightcolor=c["scroll_thumb"], darkcolor=c["scroll_thumb"],
+            "Vertical.TScrollbar",
+            background=c["scroll_thumb"],
+            troughcolor=c["scroll_trough"],
+            bordercolor=c["scroll_trough"],
+            lightcolor=c["scroll_thumb"],
+            darkcolor=c["scroll_thumb"],
+            arrowcolor=c["scroll_trough"],
+            gripcount=0,
+            width=16,
         )
-        for s in (self.tree_scroll, self.tag_scroll, self.content_scroll):
-            s.configure(style=scroll_style)
+        self.style.configure(
+            "Horizontal.TScrollbar",
+            background=c["scroll_thumb"],
+            troughcolor=c["scroll_trough"],
+            bordercolor=c["scroll_trough"],
+            arrowcolor=c["scroll_trough"],
+            gripcount=0,
+            width=16,
+        )
 
-        # 标签列表
-        self.tag_listbox.configure(
-            bg=c["sidebar_bg"], fg=c["sidebar_fg"],
-            selectbackground=c["sidebar_item_selected"],
-            selectforeground=c["sidebar_fg"],
+        # 右键菜单
+        self.tree_menu.configure(
+            bg=c["menu_bg"],
+            fg=c["menu_fg"],
+            activebackground=c["menu_hover"],
+            activeforeground=c["menu_fg"],
+            separator=c.get("separator", "#d0d0d0"),
         )
+        # 内容区右键菜单
+        self.content_menu.configure(
+            bg=c["menu_bg"],
+            fg=c["menu_fg"],
+            activebackground=c["menu_hover"],
+            activeforeground=c["menu_fg"],
+            separator=c.get("separator", "#d0d0d0"),
+        )
+
+        # 标签面板
+        self.section_all_header.configure(
+            bg=c["sidebar_header_bg"], fg=c["sidebar_header_fg"])
+        self.section_all_body.configure(bg=c["sidebar_bg"])
+        self.tag_search_entry.configure(
+            bg=c["search_bg"], fg=c["search_fg"],
+            highlightbackground=c["search_border"],
+            highlightcolor=c["search_border"],
+            insertbackground=c["toolbar_fg"],
+        )
+        # 占位文字颜色：如果当前显示的是占位文字，用灰色
+        if self.tag_search_entry.get() == self._tag_search_placeholder:
+            self.tag_search_entry.configure(fg="#777" if self.theme_mode == "dark" else "#999")
+        self.tag_intersection_label.configure(
+            bg=c["sidebar_bg"], fg=c["sidebar_fg"],
+        )
+        self.tag_tree_container.configure(
+            bg=c["sidebar_bg"], highlightbackground=c["sidebar_bg"],
+        )
+
+        listbox_style = {
+            "bg": c["sidebar_bg"], "fg": c["sidebar_fg"],
+            "selectbackground": c["sidebar_item_selected"],
+            "selectforeground": c["sidebar_fg"],
+        }
+        for prefix in ("file_", "tag_"):
+            hdr = getattr(self, f"{prefix}tags_header", None)
+            lb = getattr(self, f"{prefix}tags_listbox", None)
+            bd = getattr(self, f"{prefix}tags_body", None)
+            sep = getattr(self, f"{prefix}tags_sep", None)
+            ctr = getattr(self, f"{prefix}tags_container", None)
+            if hdr:
+                hdr.configure(bg=c["sidebar_header_bg"],
+                              fg=c["sidebar_header_fg"])
+            if lb:
+                lb.configure(**listbox_style)
+            if bd:
+                bd.configure(bg=c["sidebar_bg"])
+            if sep:
+                sep.configure(bg=c["sidebar_bg"])
+            if ctr:
+                ctr.configure(bg=c["sidebar_bg"])
 
         # ── 内容区 ──
+        self.content_body.configure(bg=c["app_bg"], highlightbackground=c["app_bg"])
         self.content_header.configure(bg=c["content_header_bg"])
         self.content_title.configure(bg=c["content_header_bg"], fg=c["content_header_fg"])
+        self.text_container.configure(bg=c["content_bg"], highlightbackground=c["content_bg"])
         self.content_text.configure(
             bg=c["content_bg"], fg=c["content_fg"],
             insertbackground=c["content_fg"],
@@ -812,6 +1714,18 @@ class IndeXarApp:
                 activebackground="#c03333",
             )
 
+        # ── 更新 hover 颜色 ──
+        for btn in (self.min_btn, self.max_btn):
+            btn._nb_normal_bg = c["toolbar_bg"]
+            btn._nb_hover_bg = c["toolbar_btn_hover"]
+        self.close_btn._nb_normal_bg = c["toolbar_bg"]
+        self.close_btn._nb_hover_bg = "#e81123" if self.theme_mode == "light" else "#c03333"
+
+        self.new_folder_btn._nb_normal_bg = c["sidebar_header_bg"]
+        self.new_folder_btn._nb_hover_bg = c["sidebar_item_selected"]
+        self.new_note_btn._nb_normal_bg = c["sidebar_header_bg"]
+        self.new_note_btn._nb_hover_bg = c["sidebar_item_selected"]
+
     # ══════════════════════════════════
     # 面板切换
     # ══════════════════════════════════
@@ -820,15 +1734,438 @@ class IndeXarApp:
         self.current_panel = "files"
         self.tag_frame.pack_forget()
         self.file_tree_frame.pack(fill=tk.BOTH, expand=True)
+        self._restore_sidebar_if_collapsed()
         self._update_nav_icons()
         self._refresh_file_tree()
+        self._apply_file_tags_visibility()
+        self._refresh_file_tags()
 
     def _show_tags(self):
         self.current_panel = "tags"
         self.file_tree_frame.pack_forget()
         self.tag_frame.pack(fill=tk.BOTH, expand=True)
+        self._restore_sidebar_if_collapsed()
         self._update_nav_icons()
         self._refresh_tags()
+        self._apply_file_tags_visibility()
+        self._refresh_file_tags()
+
+    def _restore_sidebar_if_collapsed(self):
+        """如果侧栏被拖到收起状态，恢复默认宽度"""
+        if self._sidebar_width < 50:
+            self._sidebar_width = 240
+            self.side_frame.configure(width=240)
+
+    def _create_note(self, default_dir=""):
+        """弹出新建笔记对话框"""
+        from file_handler import get_all_subdirs, create_note
+
+        dialog = self._make_dialog(self.root, "新建笔记", 400, 240)
+
+        frame = tk.Frame(dialog, padx=20, pady=16)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        # 笔记标题
+        tk.Label(frame, text="笔记标题：", anchor=tk.W,
+                 font=("Microsoft YaHei", 10)).pack(fill=tk.X, pady=(0, 4))
+        title_var = tk.StringVar()
+        title_entry = tk.Entry(frame, textvariable=title_var,
+                                font=("Microsoft YaHei", 10), relief=tk.SUNKEN)
+        title_entry.pack(fill=tk.X, pady=(0, 12))
+        title_entry.focus_set()
+
+        # 存放目录
+        tk.Label(frame, text="存放目录：", anchor=tk.W,
+                 font=("Microsoft YaHei", 10)).pack(fill=tk.X, pady=(0, 4))
+        dir_frame = tk.Frame(frame)
+        dir_frame.pack(fill=tk.X, pady=(0, 16))
+        dir_var = tk.StringVar(value=default_dir if default_dir else "(根目录)")
+        dir_label = tk.Label(dir_frame, textvariable=dir_var,
+                             font=("Microsoft YaHei", 9),
+                             bg="#fff", fg="#333",
+                             anchor=tk.W, padx=8, pady=3,
+                             relief=tk.SUNKEN)
+        dir_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        browse_btn = tk.Button(dir_frame, text="浏览…",
+                               font=("Microsoft YaHei", 9),
+                               command=lambda: self._select_dir_dialog(
+                                   dialog, dir_var, default_dir))
+        browse_btn.pack(side=tk.RIGHT, padx=(10, 0))
+
+        # 按钮行
+        btn_frame = tk.Frame(frame)
+        btn_frame.pack(fill=tk.X)
+
+        def do_create():
+            title = title_var.get().strip()
+            if not title:
+                return
+            subdir_raw = dir_var.get()
+            subdir = "" if subdir_raw == "(根目录)" else subdir_raw
+            rel_path = create_note(title, subdir)
+            if rel_path:
+                dialog.destroy()
+                self._refresh_file_tree()
+                self._display_note(rel_path)
+
+        tk.Button(btn_frame, text="取消",
+                  font=("Microsoft YaHei", 9),
+                  command=dialog.destroy).pack(side=tk.RIGHT, padx=(10, 0))
+        tk.Button(btn_frame, text="创建",
+                  font=("Microsoft YaHei", 9),
+                  command=do_create).pack(side=tk.RIGHT)
+
+        title_entry.bind("<Return>", lambda e: do_create())
+        self._theme_dialog_body(dialog)
+
+    def _make_dialog(self, parent, title, width, height):
+        """创建无边框对话框，带自定义标题栏"""
+        win = tk.Toplevel(parent)
+        win.overrideredirect(True)
+        # 不在创建时 grab — 此时窗口在 (0,0) 默认位置，
+        # grab 会锁死位置，后续 MoveWindow/geometry 全部无效
+        win.configure(bg=self.colors["sidebar_bg"])
+        win.resizable(False, False)
+
+        # ── 自定义标题栏 ──
+        bar = tk.Frame(win, height=28)
+        bar.pack(fill=tk.X, side=tk.TOP)
+        bar.pack_propagate(False)
+        lbl = tk.Label(bar, text=f"  {title}", font=("Microsoft YaHei", 10),
+                       anchor=tk.W)
+        lbl.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        cls = tk.Button(bar, text="✕", font=("Segoe UI", 9),
+                       relief=tk.FLAT, bd=0, padx=8,
+                       command=win.destroy)
+        cls.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # 拖拽
+        def _start(e):
+            win._dx = e.x_root
+            win._dy = e.y_root
+        def _drag(e):
+            x = win.winfo_x() + e.x_root - win._dx
+            y = win.winfo_y() + e.y_root - win._dy
+            win.geometry(f"+{x}+{y}")
+            win._dx = e.x_root
+            win._dy = e.y_root
+        for w in (bar, lbl):
+            w.bind("<Button-1>", _start)
+            w.bind("<B1-Motion>", _drag)
+
+        # ── 主题着色（仅标题栏）──
+        c = self.colors
+        bar.configure(bg=c["toolbar_bg"])
+        lbl.configure(bg=c["toolbar_bg"], fg=c["toolbar_fg"])
+        cls.configure(bg=c["toolbar_bg"], fg=c["toolbar_fg"],
+                      activebackground="#e81123" if self.theme_mode == "light" else "#c03333")
+        win._titlebar = bar
+        win._dialog_width = width
+        win._dialog_height = height
+
+        return win
+
+    def _theme_dialog_body(self, win):
+        """对对话框内部所有控件应用主题色 + 定位（在所有控件添加完成后调用）"""
+        c = self.colors
+
+        def _recurse(widget):
+            if widget is getattr(win, '_titlebar', None):
+                return
+            if isinstance(widget, tk.Frame):
+                widget.configure(bg=c["sidebar_bg"], bd=0, highlightthickness=0,
+                                 highlightbackground=c["sidebar_bg"])
+            elif isinstance(widget, tk.Label):
+                widget.configure(bg=c["sidebar_bg"], fg=c["sidebar_fg"])
+            elif isinstance(widget, tk.Entry):
+                widget.configure(
+                    bg=c["content_bg"], fg=c["content_fg"],
+                    insertbackground=c["content_fg"],
+                    relief=tk.SUNKEN,
+                )
+            elif isinstance(widget, tk.Button):
+                widget.configure(
+                    bg=c["toolbar_btn_bg"], fg=c["toolbar_btn_fg"],
+                    activebackground=c["toolbar_btn_hover"],
+                    activeforeground=c["toolbar_btn_fg"],
+                    relief=tk.RIDGE, bd=1,
+                    highlightthickness=0,
+                    padx=12,
+                )
+            elif isinstance(widget, ttk.Treeview):
+                # 对话框内 Treeview（目录选择器）需要可见细边框
+                _style_key = f"dialog_treeview_{id(widget)}"
+                s = ttk.Style()
+                s.configure(_style_key,
+                    background=c["sidebar_bg"], foreground=c["sidebar_fg"],
+                    fieldbackground=c["sidebar_bg"],
+                    borderwidth=1, lightcolor=c["separator"],
+                    darkcolor=c["separator"], bordercolor=c["separator"],
+                    font=("Microsoft YaHei", 10), rowheight=26, indent=14,
+                )
+                s.map(_style_key,
+                    background=[("selected", c["sidebar_item_selected"])],
+                    foreground=[("selected", c["sidebar_fg"])])
+                widget.configure(style=_style_key)
+            for child in widget.winfo_children():
+                _recurse(child)
+
+        for child in win.winfo_children():
+            _recurse(child)
+
+        # ── 窗口外边框 ──
+        border_c = "#555555" if self.theme_mode == "dark" else "#777777"
+        win.configure(highlightthickness=1, highlightbackground=border_c,
+                      highlightcolor=border_c)
+
+        # ── 屏幕居中：grab 后 geometry + MoveWindow 覆盖 ──
+        w = getattr(win, '_dialog_width', 400)
+        h = getattr(win, '_dialog_height', 300)
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        x = (sw - w) // 2
+        y = (sh - h) // 2
+        win.attributes('-topmost', True)
+        win.grab_set()
+        win.update_idletasks()
+        win.geometry(f"{w}x{h}+{int(x)}+{int(y)}")
+        try:
+            hwnd = win.winfo_id()
+            ctypes.windll.user32.MoveWindow(hwnd, x, y, w, h, True)
+        except Exception:
+            pass
+        win.lift()
+        win.focus_force()
+
+        # ── Escape 关闭 ──
+        win.bind("<Escape>", lambda e: win.destroy())
+
+        # ── 点击外部关闭 ──
+        _closed = []
+        def _on_outside(event):
+            if _closed or not win.winfo_exists():
+                return
+            try:
+                wx = win.winfo_rootx()
+                wy = win.winfo_rooty()
+                ww = win.winfo_width()
+                wh = win.winfo_height()
+                if not (wx <= event.x_root <= wx + ww and
+                        wy <= event.y_root <= wy + wh):
+                    _closed.append(True)
+                    win.destroy()
+            except tk.TclError:
+                pass
+
+        _outside_id = self.root.bind("<Button-1>", _on_outside, add="+")
+        def _cleanup():
+            try:
+                self.root.unbind("<Button-1>", _outside_id)
+            except tk.TclError:
+                pass
+        win.bind("<Destroy>", lambda e: _cleanup(), add="+")
+
+    def _offset_from_parent(self, win, parent, w, h):
+        """将窗口放在父窗口右下方偏移位置"""
+        self.root.update_idletasks()
+        px = parent.winfo_rootx()
+        py = parent.winfo_rooty()
+        pw = parent.winfo_width()
+        ph = parent.winfo_height()
+        x = px + (pw - w) // 2 + 40
+        y = py + (ph - h) // 2 + 20
+        win.geometry(f"{w}x{h}+{x}+{y}")
+
+    def _select_dir_dialog(self, parent_win, result_var, current_dir=""):
+        """弹出树状目录选择对话框，完全手动构建避免 grab/position 冲突"""
+        from file_handler import list_notes_tree
+
+        c = self.colors
+        W, H = 380, 450
+
+        # 释放父对话框 grab + 关闭 topmost
+        try:
+            parent_win.grab_release()
+            parent_win.attributes('-topmost', False)
+        except tk.TclError:
+            pass
+
+        # ── 完全手动创建窗口（不用 _make_dialog，避免 grab 锁位置）──
+        dialog = tk.Toplevel(self.root)
+        dialog.overrideredirect(True)
+        border_c = "#555555" if self.theme_mode == "dark" else "#777777"
+        dialog.configure(bg=c["sidebar_bg"], highlightthickness=1,
+                         highlightbackground=border_c,
+                         highlightcolor=border_c)
+        dialog.resizable(False, False)
+
+        # 标题栏
+        bar = tk.Frame(dialog, height=28, bg=c["toolbar_bg"])
+        bar.pack(fill=tk.X, side=tk.TOP)
+        bar.pack_propagate(False)
+        tk.Label(bar, text="  选择目录", font=("Microsoft YaHei", 10),
+                 anchor=tk.W, bg=c["toolbar_bg"], fg=c["toolbar_fg"]
+                 ).pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tk.Button(bar, text="✕", font=("Segoe UI", 9),
+                  relief=tk.FLAT, bd=0, padx=8, command=dialog.destroy,
+                  bg=c["toolbar_bg"], fg=c["toolbar_fg"],
+                  activebackground=("#e81123" if self.theme_mode == "light" else "#c03333")
+                  ).pack(side=tk.RIGHT, fill=tk.Y)
+
+        # 拖拽
+        def _drag_start(e):
+            dialog._dx, dialog._dy = e.x_root, e.y_root
+        def _drag_move(e):
+            dialog.geometry(f"+{dialog.winfo_x() + e.x_root - dialog._dx}"
+                            f"+{dialog.winfo_y() + e.y_root - dialog._dy}")
+            dialog._dx, dialog._dy = e.x_root, e.y_root
+        for w in (bar, bar.winfo_children()[0]):
+            w.bind("<Button-1>", _drag_start)
+            w.bind("<B1-Motion>", _drag_move)
+
+        # 关闭恢复
+        def _restore_parent():
+            try:
+                parent_win.attributes('-topmost', True)
+                parent_win.grab_set()
+            except tk.TclError:
+                pass
+        dialog.bind("<Destroy>", lambda e: _restore_parent(), add="+")
+
+        # Treeview
+        tree = ttk.Treeview(dialog, show="tree", selectmode="browse")
+        tree.pack(fill=tk.BOTH, expand=True, padx=14, pady=(14, 0))
+        tree.bind("<<TreeviewSelect>>", lambda e: _auto_open())
+        def _auto_open():
+            sel = tree.selection()
+            if sel:
+                tree.item(sel[0], open=not tree.item(sel[0], "open"))
+
+        root_iid = tree.insert("", "end", text="(根目录)", open=True)
+        def _populate(parent_iid, items):
+            for item in items:
+                if not item["is_dir"]:
+                    continue
+                node = tree.insert(parent_iid, "end",
+                                   text=item["name"], values=(item["path"],))
+                if item["children"]:
+                    _populate(node, item["children"])
+
+        tree_data = list_notes_tree()
+        if tree_data:
+            _populate(root_iid, tree_data)
+        if current_dir:
+            for item in tree.get_children(root_iid):
+                vals = tree.item(item, "values")
+                if vals and vals[0] == current_dir:
+                    tree.selection_set(item)
+                    tree.see(item)
+                    break
+
+        # 按钮
+        btn_frame = tk.Frame(dialog, bg=c["sidebar_bg"], bd=0, highlightthickness=0)
+        btn_frame.pack(fill=tk.X, padx=14, pady=14)
+        def confirm():
+            sel = tree.selection()
+            if sel:
+                vals = tree.item(sel[0], "values")
+                result_var.set(vals[0] if vals else "(根目录)")
+            else:
+                result_var.set("(根目录)")
+            dialog.destroy()
+        tree.bind("<Double-Button-1>", lambda e: confirm())
+        for text, cmd in [("确定", confirm), ("取消", dialog.destroy)]:
+            btn = tk.Button(btn_frame, text=text, command=cmd,
+                            font=("Microsoft YaHei", 9),
+                            bg=c["toolbar_btn_bg"], fg=c["toolbar_btn_fg"],
+                            activebackground=c["toolbar_btn_hover"],
+                            activeforeground=c["toolbar_btn_fg"],
+                            relief=tk.RIDGE, bd=1, highlightthickness=0,
+                            highlightbackground=c["toolbar_btn_bg"], padx=12)
+            btn.pack(side=tk.RIGHT, padx=(10, 0) if text == "确定" else 0)
+
+        # Treeview 样式（必须以 .Treeview 结尾）
+        _sk = f"dir_{id(tree)}.Treeview"
+        s = ttk.Style()
+        s.configure(_sk, background=c["sidebar_bg"], foreground=c["sidebar_fg"],
+                    fieldbackground=c["sidebar_bg"],
+                    borderwidth=1, lightcolor="#555555" if self.theme_mode == "dark" else "#999999",
+                    darkcolor="#555555" if self.theme_mode == "dark" else "#999999",
+                    bordercolor="#555555" if self.theme_mode == "dark" else "#999999",
+                    font=("Microsoft YaHei", 10), rowheight=26, indent=14)
+        s.map(_sk, background=[("selected", c["sidebar_item_selected"])],
+              foreground=[("selected", c["sidebar_fg"])])
+        tree.configure(style=_sk)
+
+        # ── 居中定位：geometry + MoveWindow 缺一不可 ──
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        x, y = (sw - W) // 2, (sh - H) // 2
+        dialog.attributes('-topmost', True)
+        dialog.grab_set()
+        dialog.update_idletasks()
+        dialog.geometry(f"{W}x{H}+{x}+{y}")
+        hwnd = dialog.winfo_id()
+        ctypes.windll.user32.MoveWindow(hwnd, x, y, W, H, True)
+        dialog.lift()
+        dialog.focus_force()
+        dialog.bind("<Escape>", lambda e: dialog.destroy())
+
+    def _create_folder(self, default_dir=""):
+        """弹出新建文件夹对话框（含目录选择）"""
+        from file_handler import make_subdir, get_all_subdirs
+
+        dialog = self._make_dialog(self.root, "新建文件夹", 400, 250)
+
+        frame = tk.Frame(dialog, padx=20, pady=16)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        # 父目录选择
+        tk.Label(frame, text="所在目录：", anchor=tk.W,
+                 font=("Microsoft YaHei", 10)).pack(fill=tk.X, pady=(0, 4))
+        dir_frame = tk.Frame(frame)
+        dir_frame.pack(fill=tk.X, pady=(0, 12))
+        parent_var = tk.StringVar(value=default_dir if default_dir else "(根目录)")
+        dir_label = tk.Label(dir_frame, textvariable=parent_var,
+                             font=("Microsoft YaHei", 9),
+                             bg="#fff", fg="#333",
+                             anchor=tk.W, padx=8, pady=3,
+                             relief=tk.SUNKEN)
+        dir_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        browse_btn = tk.Button(dir_frame, text="浏览…",
+                               font=("Microsoft YaHei", 9),
+                               command=lambda: self._select_dir_dialog(
+                                   dialog, parent_var, default_dir))
+        browse_btn.pack(side=tk.RIGHT, padx=(10, 0))
+
+        # 文件夹名称
+        tk.Label(frame, text="文件夹名称：", anchor=tk.W,
+                 font=("Microsoft YaHei", 10)).pack(fill=tk.X, pady=(0, 4))
+        name_var = tk.StringVar(value="new_folder")
+        entry = tk.Entry(frame, textvariable=name_var,
+                          font=("Microsoft YaHei", 10), relief=tk.SUNKEN)
+        entry.pack(fill=tk.X, pady=(0, 14))
+        entry.select_range(0, tk.END)
+        entry.focus_set()
+
+        btn_frame = tk.Frame(frame)
+        btn_frame.pack(fill=tk.X)
+
+        def do_create():
+            name = name_var.get().strip()
+            if name:
+                raw = parent_var.get()
+                parent = "" if raw == "(根目录)" else raw
+                make_subdir(parent, name)
+                dialog.destroy()
+                self._refresh_file_tree()
+
+        tk.Button(btn_frame, text="取消", font=("Microsoft YaHei", 9),
+                  command=dialog.destroy).pack(side=tk.RIGHT, padx=(10, 0))
+        tk.Button(btn_frame, text="创建", font=("Microsoft YaHei", 9),
+                  command=do_create).pack(side=tk.RIGHT)
+        entry.bind("<Return>", lambda e: do_create())
+        self._theme_dialog_body(dialog)
 
     def _update_nav_icons(self):
         """根据当前主题色和活动面板刷新图标"""
@@ -864,7 +2201,7 @@ class IndeXarApp:
         for item in items:
             iid = item["path"]
             if item["is_dir"]:
-                display = f"  📁 {item['name']}"
+                display = f" 📁 {item['name']}"
                 node = self.tree.insert(
                     parent_iid, "end", iid=iid,
                     text=display, values=(iid, True),
@@ -872,12 +2209,12 @@ class IndeXarApp:
                 if item["children"]:
                     file_count += self._populate_tree(node, item["children"])
                 else:
-                    # 插入空白子节点，让展开箭头显示
                     self.tree.insert(node, "end", text="")
             else:
-                display = f"  📄 {item['name']}"
+                display = f" 📄 {item['name']}"
+                file_iid = f"f:{iid}"  # 前缀区分，避免与同名文件夹冲突
                 self.tree.insert(
-                    parent_iid, "end", iid=iid,
+                    parent_iid, "end", iid=file_iid,
                     text=display, values=(iid, False),
                 )
                 file_count += 1
@@ -894,6 +2231,10 @@ class IndeXarApp:
         if vals[0] == "__header__":
             return
         iid, is_dir = vals[0], vals[1]
+        # 右键触发的选择变化 → 不 toggle 文件夹
+        if getattr(self, '_right_clicking', False):
+            self._right_clicking = False
+            return
         if is_dir == "True" or is_dir is True:
             # 点的是文件夹 — 切换展开/折叠
             if self.tree.item(selected[0], "open"):
@@ -908,17 +2249,177 @@ class IndeXarApp:
     # ══════════════════════════════════
 
     def _refresh_tags(self):
-        self.tag_listbox.delete(0, tk.END)
-        self.tag_listbox.insert(tk.END, "")
-        self.tag_listbox.insert(tk.END, "   ⏳ 标签功能开发中")
-        self.tag_listbox.insert(tk.END, "")
-        self.tag_listbox.insert(tk.END, "   在 .md 文件头部添加：")
-        self.tag_listbox.insert(tk.END, "   ---")
-        self.tag_listbox.insert(tk.END, "   tags: [标记, 分类]")
-        self.tag_listbox.insert(tk.END, "   ---")
+        """重建标签树（从 index.json 缓存读取，不重新扫描）"""
+        self.tag_tree.delete(*self.tag_tree.get_children())
+        self.tag_intersection_label.configure(text="")
 
-    def _on_tag_selected(self, event):
-        pass
+        tag_index = get_tag_index()
+        if not tag_index:
+            self.tag_tree.insert("", "end",
+                                 text="  暂无标签",
+                                 iid="__notags__")
+            self.tag_tree.item("__notags__", tags=())
+            return
+
+        search_text = self.tag_search_var.get().strip().lower()
+        if search_text == self._tag_search_placeholder.lower():
+            search_text = ""
+        any_visible = False
+
+        for tag, files in tag_index.items():
+            if search_text and search_text not in tag.lower():
+                continue
+            any_visible = True
+            count = len(files)
+            iid = f"tag_{tag}"
+            display = f" {tag}  ({count})"
+            self.tag_tree.insert("", "end", iid=iid, text=display, open=False)
+
+            for fpath in files:
+                name = fpath.split("/")[-1]
+                fid = f"file_{tag}_{fpath}"
+                self.tag_tree.insert(iid, "end", iid=fid,
+                                     text=f"  {name}",
+                                     values=(fpath,))
+                self.tag_tree.item(fid, tags=("file_node",))
+
+        if not any_visible:
+            if search_text:
+                self.tag_tree.insert("", "end",
+                                     text=f"  未找到 \"{search_text}\"",
+                                     iid="__noresult__")
+                self.tag_tree.item("__noresult__", tags=())
+            else:
+                self.tag_tree.insert("", "end",
+                                     text="  暂无标签",
+                                     iid="__notags__")
+                self.tag_tree.item("__notags__", tags=())
+
+    def _on_tag_search(self):
+        """实时过滤标签列表（忽略占位文字）"""
+        if self.tag_search_var.get() == self._tag_search_placeholder:
+            return
+        self._refresh_tags()
+
+    def _on_tag_search_focus_in(self, event):
+        """搜索框获得焦点时清除占位文字"""
+        if self.tag_search_entry.get() == self._tag_search_placeholder:
+            self.tag_search_entry.delete(0, tk.END)
+            self.tag_search_entry.configure(fg=self.colors["search_fg"])
+
+    def _on_tag_search_focus_out(self, event):
+        """搜索框失去焦点时若为空则恢复占位文字"""
+        if not self.tag_search_var.get().strip():
+            self.tag_search_entry.delete(0, tk.END)
+            self.tag_search_entry.insert(0, self._tag_search_placeholder)
+            ph_color = "#777" if self.theme_mode == "dark" else "#999"
+            self.tag_search_entry.configure(fg=ph_color)
+
+    def _on_tag_tree_select(self, event):
+        """标签树选中：单标签切换展开，多标签显示交集"""
+        sel = self.tag_tree.selection()
+        tag_iids = [i for i in sel if i.startswith("tag_")]
+
+        if len(tag_iids) == 0:
+            self.tag_intersection_label.configure(text="")
+            return
+
+        if len(tag_iids) == 1:
+            self.tag_intersection_label.configure(text="")
+        else:
+            self._update_tag_intersection(tag_iids)
+
+    def _on_tag_tree_click(self, event):
+        """单击标签节点 → 展开/折叠"""
+        iid = self.tag_tree.identify_row(event.y)
+        if not iid or not iid.startswith("tag_"):
+            return
+
+        # 只对单选的标签切换展开
+        sel = self.tag_tree.selection()
+        tag_iids = [i for i in sel if i.startswith("tag_")]
+        if len(tag_iids) == 1 and tag_iids[0] == iid:
+            current = self.tag_tree.item(iid, "open")
+            self.tag_tree.item(iid, open=not current)
+
+    def _on_tag_tree_double_click(self, event):
+        """双击文件节点 → 打开笔记"""
+        iid = self.tag_tree.identify_row(event.y)
+        if not iid:
+            return
+        vals = self.tag_tree.item(iid, "values")
+        if vals:
+            fpath = vals[0]
+            self._display_note(fpath)
+            # 同步选中文件树节点
+            try:
+                self.tree.selection_set(f"f:{fpath}")
+                self.tree.see(f"f:{fpath}")
+            except Exception:
+                pass
+
+    def _update_tag_intersection(self, tag_iids):
+        """计算并显示多选标签的文件交集"""
+        tag_index = get_tag_index()
+        if not tag_index:
+            self.tag_intersection_label.configure(text="")
+            return
+
+        file_sets = []
+        tag_names = []
+        for iid in tag_iids:
+            tag_name = iid[4:]  # strip "tag_" prefix
+            if tag_name in tag_index:
+                file_sets.append(set(tag_index[tag_name]))
+                tag_names.append(tag_name)
+
+        if len(file_sets) < 2:
+            self.tag_intersection_label.configure(text="")
+            return
+
+        intersection = file_sets[0]
+        for fs in file_sets[1:]:
+            intersection = intersection & fs
+
+        count = len(intersection)
+        tag_str = " ∩ ".join(tag_names)
+        self.tag_intersection_label.configure(
+            text=f"  {tag_str} → {count} 个文件"
+        )
+
+        # 刷新文件树为交集结果
+        if self.current_panel == "tags" and count > 0:
+            pass  # 交集信息已在上方显示，下方 Treeview 保持原样
+
+    def _get_selected_tag_names(self):
+        """返回当前选中的标签名列表"""
+        sel = self.tag_tree.selection()
+        return [i[4:] for i in sel if i.startswith("tag_")]
+
+    def _on_tag_tree_motion(self, event):
+        """标签树行鼠标悬停 → 高亮"""
+        iid = self.tag_tree.identify_row(event.y)
+        prev = getattr(self, '_tag_tree_hover_item', None)
+        if prev and prev != iid:
+            try:
+                self.tag_tree.item(prev, tags=())
+            except tk.TclError:
+                pass
+        if iid and iid.startswith("tag_"):
+            self.tag_tree.item(iid, tags=('hover',))
+            self._tag_tree_hover_item = iid
+        else:
+            self._tag_tree_hover_item = None
+
+    def _on_tag_tree_leave(self, event):
+        """鼠标离开标签树 → 清除悬停高亮"""
+        prev = getattr(self, '_tag_tree_hover_item', None)
+        if prev:
+            try:
+                self.tag_tree.item(prev, tags=())
+            except tk.TclError:
+                pass
+            self._tag_tree_hover_item = None
 
     # ══════════════════════════════════
     # 内容
@@ -929,17 +2430,82 @@ class IndeXarApp:
         if content is None:
             self._set_content(f"⚠️  找不到文件：{rel_path}.md")
             return
+        self._current_note_path = rel_path
         name = rel_path.split("/")[-1]
         self.content_title.configure(text=f"   📄 {name}.md")
         self._render_markdown(content)
+        self.status_left.configure(text=f"   当前：{rel_path}.md")
+        self._refresh_file_tags()
 
     def _render_markdown(self, md_text):
         from markdown_renderer import render_markdown
         self.content_text.configure(state=tk.NORMAL)
-        render_markdown(self.content_text, md_text)
+        render_markdown(self.content_text, md_text,
+                         link_callback=self._navigate_to_link,
+                         font_size=self._font_size)
         self.content_text.configure(state=tk.DISABLED)
 
+    def _on_content_click(self, event):
+        """内容区点击——检测是否点在 wikilink 上"""
+        try:
+            pos = self.content_text.index(f"@{event.x},{event.y}")
+            for tag in self.content_text.tag_names(pos):
+                if tag.startswith("wikilink_"):
+                    self._navigate_to_link(tag[9:])
+                    break
+        except Exception:
+            pass
+
+    def _on_content_motion(self, event):
+        """内容区鼠标移动——wikilink 上高亮 + 手型"""
+        try:
+            pos = self.content_text.index(f"@{event.x},{event.y}")
+            tags = self.content_text.tag_names(pos)
+            has_link = any(t.startswith("wikilink_") for t in tags)
+
+            # 切换鼠标指针 + 背景色
+            if has_link and not getattr(self, '_link_hover', False):
+                self._link_hover = True
+                self.content_text.config(cursor="arrow")
+                for tag in self.content_text.tag_names():
+                    if tag.startswith("wikilink_"):
+                        self.content_text.tag_configure(
+                            tag, background="#d6e4f0")
+            elif not has_link and getattr(self, '_link_hover', False):
+                self._link_hover = False
+                self.content_text.config(cursor="xterm")
+                for tag in self.content_text.tag_names():
+                    if tag.startswith("wikilink_"):
+                        self.content_text.tag_configure(
+                            tag, background="")
+        except Exception:
+            pass
+
+    def _navigate_to_link(self, target_name):
+        """点击 [[内部链接]] 时跳转到对应笔记"""
+        from file_handler import find_note_by_name
+        # 兼容 [[文件.md]] 和 [[文件]] 两种写法
+        target_name = target_name.replace(".md", "")
+        path = find_note_by_name(target_name)
+        if path:
+            self._display_note(path)
+            # 同步选中文件树对应节点
+            try:
+                self.tree.selection_set(f"f:{path}")
+                self.tree.see(f"f:{path}")
+            except Exception:
+                pass
+        else:
+            self.status_left.configure(
+                text=f"  未找到笔记：{target_name}")
+            self._set_content(
+                f"⚠️  未找到笔记「{target_name}」\n\n"
+                f"请确认 data/ 目录下是否存在该名称的 .md 文件。"
+            )
+
     def _set_content(self, text):
+        self._current_note_path = None
+        self._refresh_file_tags()
         self.content_text.configure(state=tk.NORMAL)
         self.content_text.delete(1.0, tk.END)
         self.content_text.insert(tk.END, text)
@@ -980,8 +2546,307 @@ class IndeXarApp:
         self.status_left.configure(text=f"   {len(results)} 条结果")
 
     # ══════════════════════════════════
+    # 视图菜单
+    # ══════════════════════════════════
+
+    def _get_view_menu_items(self):
+        """动态生成视图菜单（带复选框状态）"""
+        follow = self._follow_system_theme
+        sidebar_visible = self._sidebar_width > 0
+        sidebar_text = "隐藏侧栏" if sidebar_visible else "显示侧栏"
+        return [
+            ("字号…", self._open_font_dialog),
+            ("切换主题", self._toggle_theme),
+            (sidebar_text, self._toggle_sidebar),
+            None,
+            (f"跟随系统主题  {'✓' if follow else ''}", self._toggle_follow_system_theme),
+        ]
+
+    def _zoom_in(self):
+        """放大字号"""
+        self._font_size = min(24, self._font_size + self._font_step)
+        self._apply_font_size()
+        self._save_settings()
+        self.status_left.configure(text=f"   字号: {self._font_size}")
+
+    def _zoom_out(self):
+        """缩小字号"""
+        self._font_size = max(8, self._font_size - self._font_step)
+        self._apply_font_size()
+        self._save_settings()
+        self.status_left.configure(text=f"   字号: {self._font_size}")
+
+    def _zoom_reset(self):
+        """重置字号"""
+        self._font_size = 11
+        self._apply_font_size()
+        self._save_settings()
+        self.status_left.configure(text=f"   字号: {self._font_size}")
+
+    def _apply_font_size(self):
+        """应用当前字号到内容区并重新渲染"""
+        fs = self._font_size
+        self.content_text.configure(font=("Microsoft YaHei", fs))
+        # 如果有当前打开的文件，重新渲染
+        if hasattr(self, '_current_note_path') and self._current_note_path:
+            self._display_note(self._current_note_path)
+
+    def _open_font_dialog(self):
+        """打开字号设置弹窗（+/- 按钮 + 输入 + 重置）"""
+        c = self.colors
+        W, H = 320, 210
+
+        dialog = tk.Toplevel(self.root)
+        dialog.overrideredirect(True)
+        win_border = "#555555" if self.theme_mode == "dark" else "#777777"
+        dialog.configure(bg=c["sidebar_bg"], highlightthickness=1,
+                         highlightbackground=win_border)
+
+        # ── 标题栏 ──
+        bar = tk.Frame(dialog, height=28, bg=c["toolbar_bg"])
+        bar.pack(fill=tk.X, side=tk.TOP)
+        bar.pack_propagate(False)
+        tk.Label(bar, text="  字号设置", font=("Microsoft YaHei", 10),
+                 anchor=tk.W, bg=c["toolbar_bg"], fg=c["toolbar_fg"]
+                 ).pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tk.Button(bar, text="✕", font=("Segoe UI", 9),
+                  relief=tk.FLAT, bd=0, padx=8,
+                  command=dialog.destroy,
+                  bg=c["toolbar_bg"], fg=c["toolbar_fg"],
+                  activebackground="#e81123"
+                  ).pack(side=tk.RIGHT, fill=tk.Y)
+
+        # ── 拖拽 ──
+        def _drag_start(e):
+            dialog._dx, dialog._dy = e.x_root, e.y_root
+        def _drag_move(e):
+            dialog.geometry(
+                f"+{dialog.winfo_x() + e.x_root - dialog._dx}"
+                f"+{dialog.winfo_y() + e.y_root - dialog._dy}")
+            dialog._dx, dialog._dy = e.x_root, e.y_root
+        for w in (bar, bar.winfo_children()[0]):
+            w.bind("<Button-1>", _drag_start)
+            w.bind("<B1-Motion>", _drag_move)
+
+        # ── 主体 ──
+        body = tk.Frame(dialog, bg=c["sidebar_bg"], padx=20, pady=16)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        # 字号显示变量（直接绑定 self._font_size）
+        size_var = tk.StringVar(value=str(self._font_size))
+
+        def apply_size():
+            try:
+                new_size = int(size_var.get())
+                new_size = max(8, min(24, new_size))
+                size_var.set(str(new_size))
+                self._font_size = new_size
+                self._apply_font_size()
+                self._save_settings()
+                self.status_left.configure(text=f"   字号: {self._font_size}")
+            except ValueError:
+                size_var.set(str(self._font_size))
+
+        def delta(d):
+            try:
+                cur = int(size_var.get())
+            except ValueError:
+                cur = self._font_size
+            cur = max(8, min(24, cur + d))
+            size_var.set(str(cur))
+            apply_size()
+
+        # 字号调整行：− [数字] +
+        row = tk.Frame(body, bg=c["sidebar_bg"])
+        row.pack(pady=(4, 10))
+        tk.Label(row, text="当前字号", font=("Microsoft YaHei", 9),
+                 bg=c["sidebar_bg"], fg=c["sidebar_fg"]
+                 ).pack(anchor=tk.W, pady=(0, 6))
+
+        btn_row = tk.Frame(body, bg=c["sidebar_bg"])
+        btn_row.pack()
+
+        minus_btn = tk.Button(btn_row, text="−", font=("Microsoft YaHei", 11, "bold"),
+                              width=3, relief=tk.RIDGE, bd=1,
+                              command=lambda: delta(-1))
+        minus_btn.pack(side=tk.LEFT, padx=(0, 8))
+
+        size_entry = tk.Entry(btn_row, textvariable=size_var,
+                              font=("Microsoft YaHei", 14),
+                              width=4, justify=tk.CENTER,
+                              relief=tk.FLAT, bd=0,
+                              highlightthickness=1)
+        size_entry.pack(side=tk.LEFT, padx=(0, 8))
+        size_entry.bind("<Return>", lambda e: apply_size())
+        size_entry.select_range(0, tk.END)
+        size_entry.focus_set()
+
+        plus_btn = tk.Button(btn_row, text="+", font=("Microsoft YaHei", 11, "bold"),
+                             width=3, relief=tk.RIDGE, bd=1,
+                             command=lambda: delta(1))
+        plus_btn.pack(side=tk.LEFT)
+
+        # 提示行
+        tk.Label(body, text="8 − 24", font=("Microsoft YaHei", 8),
+                 bg=c["sidebar_bg"], fg="#999"
+                 ).pack(pady=(4, 14))
+
+        # 底部：重置按钮
+        def reset_size():
+            self._font_size = 11
+            size_var.set("11")
+            self._apply_font_size()
+            self._save_settings()
+            self.status_left.configure(text="   字号: 11")
+
+        reset_btn = tk.Button(body, text="重置默认 (11)",
+                              font=("Microsoft YaHei", 9),
+                              relief=tk.RIDGE, bd=1,
+                              padx=12, pady=4,
+                              command=reset_size)
+        reset_btn.pack()
+
+        # ── 主题色 ──
+        entry_bg = c["content_bg"]
+        entry_fg = c["content_fg"]
+        btn_bg = c["toolbar_btn_bg"]
+        btn_fg = c["toolbar_btn_fg"]
+        btn_hover = c["toolbar_btn_hover"]
+
+        size_entry.configure(bg=entry_bg, fg=entry_fg,
+                             highlightbackground=c["search_border"],
+                             highlightcolor=c["search_border"],
+                             insertbackground=entry_fg)
+
+        for btn in (minus_btn, plus_btn):
+            btn.configure(bg=btn_bg, fg=btn_fg, activebackground=btn_hover,
+                          activeforeground=btn_fg)
+
+        reset_btn.configure(bg=btn_bg, fg=btn_fg, activebackground=btn_hover,
+                            activeforeground=btn_fg)
+
+        # ── 定位 ──
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        x, y = (sw - W) // 2, (sh - H) // 2
+        dialog.update_idletasks()
+        dialog.geometry(f"{W}x{H}+{x}+{y}")
+        try:
+            hwnd = dialog.winfo_id()
+            ctypes.windll.user32.MoveWindow(hwnd, x, y, W, H, True)
+        except Exception:
+            pass
+        dialog.attributes('-topmost', True)
+        dialog.lift()
+        dialog.focus_force()
+        dialog.bind("<Escape>", lambda e: dialog.destroy())
+
+    def _toggle_sidebar(self):
+        """显示/隐藏侧栏"""
+        if self._sidebar_width > 0:
+            self._prev_sidebar_width = self._sidebar_width
+            self.side_frame.pack_forget()
+            self._grip.pack_forget()
+            self._sidebar_width = 0
+        else:
+            self._sidebar_width = getattr(self, '_prev_sidebar_width', 240)
+            self.side_frame.pack(side=tk.LEFT, fill=tk.Y,
+                                 before=self.content_body)
+            self.side_frame.configure(width=self._sidebar_width)
+            self._grip.pack(side=tk.LEFT, fill=tk.Y,
+                            before=self.content_body)
+        self._save_settings()
+
+    def _toggle_follow_system_theme(self):
+        """切换跟随系统主题"""
+        self._follow_system_theme = not self._follow_system_theme
+        self._save_settings()
+        if self._follow_system_theme:
+            self._theme_overridden = False
+            sys_theme = self._read_system_theme()
+            if sys_theme != self.theme_mode:
+                self.theme_mode = sys_theme
+                self.colors = VSCodeTheme.get(self.theme_mode)
+                self._apply_theme()
+                if self.current_panel == "files":
+                    self._refresh_file_tree()
+            self.status_left.configure(text="   跟随系统主题: 开")
+        else:
+            self._theme_overridden = True
+            self.status_left.configure(text="   跟随系统主题: 关")
+
+    def _read_system_theme(self):
+        """读取 Windows 注册表系统主题设置，返回 'light' 或 'dark'"""
+        try:
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+            )
+            value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+            winreg.CloseKey(key)
+            return "light" if value != 0 else "dark"
+        except Exception:
+            return "light"
+
+    # ══════════════════════════════════
+    # 持久化设置
+    # ══════════════════════════════════
+
+    def _load_settings(self):
+        """从 settings.json 加载配置，覆盖默认值"""
+        if not os.path.exists(SETTINGS_FILE):
+            return
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                s = json.load(f)
+            if "font_size" in s:
+                self._font_size = int(s["font_size"])
+            if "theme_mode" in s and s["theme_mode"] in ("light", "dark"):
+                self.theme_mode = s["theme_mode"]
+            if "follow_system_theme" in s:
+                self._follow_system_theme = bool(s["follow_system_theme"])
+            if "sidebar_width" in s:
+                self._sidebar_width = int(s["sidebar_width"])
+                self.side_frame.configure(width=self._sidebar_width)
+            if "file_tags_collapsed" in s:
+                self._file_tags_collapsed = bool(s["file_tags_collapsed"])
+                self._apply_file_tags_visibility()
+            if "file_tags_height" in s:
+                self._file_tags_height = int(s["file_tags_height"])
+                for p in ("file_", "tag_"):
+                    ctr = getattr(self, f"{p}tags_container", None)
+                    if ctr:
+                        ctr.configure(height=self._file_tags_height)
+        except (json.JSONDecodeError, IOError, ValueError):
+            pass  # 配置文件损坏时使用默认值
+
+    def _save_settings(self):
+        """将当前配置写入 settings.json"""
+        s = {
+            "font_size": self._font_size,
+            "theme_mode": self.theme_mode,
+            "follow_system_theme": self._follow_system_theme,
+            "sidebar_width": self._sidebar_width,
+            "file_tags_collapsed": self._file_tags_collapsed,
+            "file_tags_height": self._file_tags_height,
+        }
+        try:
+            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+                json.dump(s, f, ensure_ascii=False, indent=2)
+        except IOError:
+            pass
+
+    # ══════════════════════════════════
     # 启动
     # ══════════════════════════════════
 
+    def _on_close(self):
+        """关闭窗口前保存设置"""
+        self._save_settings()
+        self.root.destroy()
+
     def run(self):
+        # 启动时构建标签索引（后台，不阻塞 UI）
+        self.root.after(100, lambda: build_tag_index())
         self.root.mainloop()

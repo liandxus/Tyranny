@@ -6,11 +6,13 @@ IndeXar Markdown 渲染器
 import re
 
 
-def render_markdown(text_widget, md_text):
+def render_markdown(text_widget, md_text, link_callback=None, font_size=11):
     """
     在 Tkinter Text 控件中渲染 Markdown 文本
     text_widget: tk.Text 控件（已启用状态）
     md_text: Markdown 原始文本
+    link_callback: 点击 [[内部链接]] 时的回调，接受笔记名参数
+    font_size: 基础字号
     """
     text_widget.delete(1.0, "end")
 
@@ -21,7 +23,7 @@ def render_markdown(text_widget, md_text):
             md_text = md_text[end + 3:]
 
     # 配置标签样式
-    _configure_tags(text_widget)
+    _configure_tags_with_size(text_widget, font_size)
 
     # 逐行渲染
     lines = md_text.split("\n")
@@ -85,8 +87,8 @@ def render_markdown(text_widget, md_text):
             indent = len(list_match.group(1))
             text = list_match.group(2)
             prefix = "  " * (indent // 2) + "• "
-            text = _render_inline(text_widget, prefix + text)
-            text_widget.insert("end", text + "\n", "list")
+            text_widget.insert("end", prefix)
+            _insert_inline(text_widget, text + "\n", link_callback)
             i += 1
             continue
 
@@ -96,18 +98,62 @@ def render_markdown(text_widget, md_text):
             indent = len(olist_match.group(1))
             text = olist_match.group(2)
             prefix = "  " * (indent // 2) + "  "
-            text = _render_inline(text_widget, prefix + text)
-            text_widget.insert("end", text + "\n", "list")
+            text_widget.insert("end", prefix)
+            _insert_inline(text_widget, text + "\n", link_callback)
             i += 1
             continue
 
         # ── 普通段落 ──
-        text = _render_inline(text_widget, line)
-        text_widget.insert("end", text + "\n")
+        _insert_inline(text_widget, line + "\n", link_callback)
         i += 1
 
     # 确保末尾有一个空行
     text_widget.insert("end", "\n")
+
+
+def _configure_tags_with_size(text_widget, base_size=11):
+    """配置 Text 控件中使用的各种格式标签（可指定基础字号）"""
+    # 标题
+    text_widget.tag_configure("heading1", font=("Microsoft YaHei", base_size + 7, "bold"),
+                               foreground="#1a1a2e", spacing1=12, spacing3=6)
+    text_widget.tag_configure("heading2", font=("Microsoft YaHei", base_size + 4, "bold"),
+                               foreground="#16213e", spacing1=10, spacing3=4)
+    text_widget.tag_configure("heading3", font=("Microsoft YaHei", base_size + 2, "bold"),
+                               foreground="#0f3460", spacing1=8, spacing3=4)
+    text_widget.tag_configure("heading4", font=("Microsoft YaHei", base_size + 1, "bold"),
+                               foreground="#333", spacing1=6, spacing3=2)
+    text_widget.tag_configure("heading5", font=("Microsoft YaHei", base_size, "bold"),
+                               spacing1=4, spacing3=2)
+    text_widget.tag_configure("heading6", font=("Microsoft YaHei", base_size, "bold"),
+                               spacing1=4, spacing3=2)
+
+    # 代码块
+    text_widget.tag_configure("code_block",
+                               font=("Consolas", base_size - 1),
+                               background="#f0f0f0",
+                               foreground="#333",
+                               spacing1=4, spacing3=4,
+                               lmargin1=16, lmargin2=16)
+
+    # 引用
+    text_widget.tag_configure("quote",
+                               font=("Microsoft YaHei", base_size, "italic"),
+                               foreground="#666",
+                               background="#f9f9f9",
+                               lmargin1=16, lmargin2=16,
+                               spacing1=2, spacing3=2)
+
+    # 分隔线
+    text_widget.tag_configure("hr", foreground="#ccc")
+
+    # 行内格式
+    text_widget.tag_configure("bold", font=("Microsoft YaHei", base_size, "bold"))
+    text_widget.tag_configure("italic", font=("Microsoft YaHei", base_size, "italic"))
+    text_widget.tag_configure("bold_italic", font=("Microsoft YaHei", base_size, "bold italic"))
+    text_widget.tag_configure("code_inline",
+                               font=("Consolas", base_size - 1),
+                               background="#eee",
+                               foreground="#c7254e")
 
 
 def _configure_tags(text_widget):
@@ -161,23 +207,53 @@ def _configure_tags(text_widget):
                                foreground="#c7254e")
 
 
-def _render_inline(text_widget, text):
+def _insert_inline(text_widget, line, link_callback=None):
     """
-    处理行内格式：**粗体**、*斜体*、`行内代码`
-    注意：Tkinter 不能直接在同一行叠加多个 tag 区域，
-    所以这里用简单标记替换，返回纯文本。
-    后续可升级为逐段插入 tag 的版本。
+    逐段插入行内格式化文本：**粗体** *斜体* `代码` [[内部链接]]
+    每段用对应 tag 标记，支持点击跳转。
     """
-    # 替换行内代码 `code` 为带标记的文本
-    text = re.sub(r"`([^`]+)`", r"「\1」", text)
-    # 替换 ***bold italic***
-    text = re.sub(r"\*\*\*(.+?)\*\*\*", r"《\1》", text)
-    # 替换 **bold**
-    text = re.sub(r"\*\*(.+?)\*\*", r"【\1】", text)
-    # 替换 *italic*
-    text = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"〈\1〉", text)
+    # 顺序：wikilink > 行内代码 > 粗斜体 > 粗体 > 斜体
+    import re
+    inline_pat = re.compile(
+        r"\[\[([^\[\]]+)(?:\|([^\[\]]+))?\]\]"  # [[链接]] 或 [[链接|显示]]
+        r"|`([^`]+)`"                                  # `行内代码`
+        r"|\*\*\*(.+?)\*\*\*"                      # ***粗斜体***
+        r"|\*\*(.+?)\*\*"                            # **粗体**
+        r"|(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)"    # *斜体*
+    )
+    pos = 0
+    while pos < len(line):
+        m = inline_pat.search(line, pos)
+        if not m:
+            text_widget.insert("end", line[pos:])
+            break
 
-    return text
+        # 匹配前的纯文本
+        if m.start() > pos:
+            text_widget.insert("end", line[pos:m.start()])
+
+        if m.group(1):  # [[wikilink]]
+            target = m.group(1).strip()
+            display = m.group(2).strip() if m.group(2) else target
+            tag = f"wikilink_{target}"
+            text_widget.insert("end", display)
+            # 标记这一段为可点击链接（+1 补偿隐式换行符）
+            text_widget.tag_add(tag,
+                                f"end-{len(display)+1}c", "end-1c")
+            text_widget.tag_configure(tag,
+                foreground="#569cd6", underline=True,
+                font=("Microsoft YaHei", 11))
+
+        elif m.group(3):  # `行内代码`
+            text_widget.insert("end", m.group(3), "code_inline")
+        elif m.group(4):  # ***粗斜体***
+            text_widget.insert("end", m.group(4), "bold_italic")
+        elif m.group(5):  # **粗体**
+            text_widget.insert("end", m.group(5), "bold")
+        elif m.group(6):  # *斜体*
+            text_widget.insert("end", m.group(6), "italic")
+
+        pos = m.end()
 
 
 def _render_code_block(text_widget, code_lines):
