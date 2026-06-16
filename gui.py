@@ -781,18 +781,19 @@ class IndeXarApp:
 
     def _build_file_tags_section(self, parent, prefix, pack_side=None):
         """在 parent 中创建'当前文件标签'区块，设置 self.{prefix}_tags_* 属性。
-        pack_side: 容器在 parent 中的 pack side（如 tk.BOTTOM 用于标签页）"""
+        pack_side: 容器在 parent 中的 pack side（如 tk.BOTTOM 用于标签页）
+        分隔条放在 container 外部（parent 中），拖动时控制 container 高度。"""
 
-        # ── 外层容器 ──
+        # ── 外层容器（标签面板本体）──
         container = tk.Frame(parent, bd=0, highlightthickness=0,
                              height=self._file_tags_height)
         container.pack(fill=tk.X, side=pack_side if pack_side else tk.TOP)
         container.pack_propagate(False)
         setattr(self, f"{prefix}tags_container", container)
 
-        # ── 可拖动分隔条 ──
-        sep = tk.Frame(container, height=4, cursor="sb_v_double_arrow")
-        sep.pack(fill=tk.X)
+        # ── 可拖动分隔条（container 外部，父容器中紧随 container 之后）──
+        sep = tk.Frame(parent, height=4, cursor="sb_v_double_arrow")
+        sep.pack(fill=tk.X, side=pack_side if pack_side else tk.TOP)
         sep.bind("<Button-1>", lambda e: self._start_tags_drag(e, prefix))
         sep.bind("<B1-Motion>", lambda e: self._do_tags_drag(e, prefix))
         sep.bind("<Double-Button-1>", lambda e: self._toggle_file_tags())
@@ -835,8 +836,8 @@ class IndeXarApp:
         if self._file_tags_collapsed:
             return
         d = self._tags_drag
-        dy = d["y"] - event.y_root
-        new_h = d["start_h"] - dy
+        dy = event.y_root - d["y"]
+        new_h = d["start_h"] + dy
         new_h = max(60, new_h)
         self._file_tags_height = new_h
         for p in ("file_", "tag_"):
