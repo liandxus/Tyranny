@@ -91,6 +91,9 @@ class IndeXarApp:
         self._selected_file_tag = None
         self._file_tags_height = 88
 
+        # 外部编辑器路径
+        self._editor_path = "notepad.exe"
+
         # 构建界面
         self._build_layout()
 
@@ -105,6 +108,9 @@ class IndeXarApp:
 
         self.colors = VSCodeTheme.get(self.theme_mode)
         self._apply_theme()
+
+        # 强制刷新布局，确保折叠状态等设置生效
+        self.root.update_idletasks()
 
         # overrideredirect 窗口首次设置 geometry 可能不生效，延迟再设一次
         self.root.after(50, lambda: self.root.geometry(
@@ -130,43 +136,51 @@ class IndeXarApp:
     # ══════════════════════════════════
 
     def _build_layout(self):
-        """搭建整体布局"""
+        """搭建整体布局。外层用 grid 控制列分布，内层面板保持 pack 垂直堆叠。"""
+        # Root: 3行, 1列
+        self.root.grid_rowconfigure(1, weight=1)
+        self.root.grid_columnconfigure(0, weight=1)
+
         # ─── 自定义标题栏 ───
         self._build_titlebar()
 
-        # ─── 主体 ───
+        # ─── 主体 (row=1, sticky="nsew") ───
         self.body = tk.Frame(self.root)
-        self.body.pack(fill=tk.BOTH, expand=True)
+        self.body.grid(row=1, column=0, sticky="nsew")
+        self.body.grid_columnconfigure(0, minsize=56)  # 活动栏固定宽度
+        self.body.grid_columnconfigure(3, weight=1)     # 内容区列
+        self.body.grid_rowconfigure(0, weight=1)
 
-        # 活动栏（左侧窄条）
-        self.nav = tk.Frame(self.body, width=48)
-        self.nav.pack(side=tk.LEFT, fill=tk.Y)
-        self.nav.pack_propagate(False)
+        # 活动栏（col=0, sticky="nsew"）
+        self.nav = tk.Frame(self.body, width=56)
+        self.nav.grid(row=0, column=0, sticky="nsew")
         self._build_nav_widgets()
 
-        # 侧栏面板
+        # 侧栏面板（col=1, sticky="ns", w=240）
         self._sidebar_width = 240
         self.side_frame = tk.Frame(self.body, width=240)
-        self.side_frame.pack(side=tk.LEFT, fill=tk.Y)
-        self.side_frame.pack_propagate(False)
+        self.side_frame.grid(row=0, column=1, sticky="ns")
+        self.side_frame.grid_propagate(False)
+        self.side_frame.grid_rowconfigure(0, weight=1)
+        self.side_frame.grid_columnconfigure(0, weight=1)
         self._build_file_tree_panel()
         self._build_tag_panel()
 
-        # ── 可拖动分隔条 ──
+        # ── 可拖动分隔条（col=2, sticky="ns", w=4）──
         self._grip = tk.Frame(self.body, width=4, cursor="sb_h_double_arrow")
-        self._grip.pack(side=tk.LEFT, fill=tk.Y)
-        self._grip.pack_propagate(False)
+        self._grip.grid(row=0, column=2, sticky="ns")
+        self._grip.grid_propagate(False)
         self._grip.bind("<Button-1>", self._start_sidebar_drag)
         self._grip.bind("<B1-Motion>", self._do_sidebar_drag)
         self._grip.bind("<ButtonRelease-1>", self._end_sidebar_drag)
 
-        # 内容区
+        # 内容区（col=3, sticky="nsew"）
         self._build_content_area(self.body)
 
-        # ─── 状态栏 ───
+        # ─── 状态栏（row=2, sticky="ew", h=22）───
         self.statusbar = tk.Frame(self.root, height=22)
-        self.statusbar.pack(fill=tk.X, side=tk.BOTTOM)
-        self.statusbar.pack_propagate(False)
+        self.statusbar.grid(row=2, column=0, sticky="ew")
+        self.statusbar.grid_propagate(False)
         self._build_statusbar_widgets()
 
         # 默认显示文件树
@@ -177,8 +191,8 @@ class IndeXarApp:
     def _build_titlebar(self):
         """自定义标题栏：拖拽移动 + 窗口控制按钮"""
         bar = tk.Frame(self.root, height=30)
-        bar.pack(fill=tk.X, side=tk.TOP)
-        bar.pack_propagate(False)
+        bar.grid(row=0, column=0, sticky="ew")
+        bar.grid_propagate(False)
         self.titlebar = bar
 
         # ── 应用图标 ──（后续替换: self._logo_img = icon_renderer.svg_icon("logo.svg", ...)）
@@ -280,7 +294,7 @@ class IndeXarApp:
             bg=self.colors["nav_bg"],
             cursor="hand2",
         )
-        self.nav_files_btn.pack(pady=(10, 0))
+        self.nav_files_btn.pack(fill=tk.X, ipady=10, pady=(4, 0))
         self.nav_files_btn.bind("<Button-1>", lambda e: self._show_files())
 
         self._nav_tags_img = icon_renderer.tag_icon(
@@ -291,7 +305,7 @@ class IndeXarApp:
             bg=self.colors["nav_bg"],
             cursor="hand2",
         )
-        self.nav_tags_btn.pack(pady=(6, 0))
+        self.nav_tags_btn.pack(fill=tk.X, ipady=10, pady=(4, 0))
         self.nav_tags_btn.bind("<Button-1>", lambda e: self._show_tags())
 
         # ── hover 效果 ──
@@ -342,16 +356,32 @@ class IndeXarApp:
             relief=tk.FLAT, bd=0, highlightthickness=0,
             padx=4, pady=0,
         )
-        self.new_note_btn.pack(side=tk.RIGHT, padx=(0, 4))
+        self.new_note_btn.pack(side=tk.RIGHT, padx=(0, 6))
         self.new_note_btn.config(
             command=lambda: self._create_note(
                 default_dir=self._get_tree_context_dir()))
+
+        # 刷新文件树按钮
+        self._refresh_img = icon_renderer.svg_icon(
+            "refresh.svg", self.colors["sidebar_header_fg"])
+        self.refresh_btn = tk.Button(
+            self._tree_header_frame,
+            image=self._refresh_img,
+            cursor="hand2",
+            relief=tk.FLAT, bd=0, highlightthickness=0,
+            padx=4, pady=0,
+            command=self._refresh_file_tree,
+        )
+        self.refresh_btn.pack(side=tk.RIGHT, padx=(0, 6))
 
         # ── hover 效果 ──
         _add_hover_bg(self.new_folder_btn,
                       self.colors["sidebar_header_bg"],
                       self.colors["sidebar_item_selected"])
         _add_hover_bg(self.new_note_btn,
+                      self.colors["sidebar_header_bg"],
+                      self.colors["sidebar_item_selected"])
+        _add_hover_bg(self.refresh_btn,
                       self.colors["sidebar_header_bg"],
                       self.colors["sidebar_item_selected"])
 
@@ -471,6 +501,8 @@ class IndeXarApp:
                 items = [
                     ("新建笔记", self._tree_context_new),
                     ("新建文件夹", self._tree_context_new_folder),
+                    None,
+                    ("外部编辑器打开", self._open_in_editor),
                     None,
                     ("重命名", self._tree_context_rename),
                     ("删除", self._tree_context_delete),
@@ -651,6 +683,28 @@ class IndeXarApp:
             import subprocess
             subprocess.run(["explorer", "/select,", os.path.normpath(target)])
 
+    def _open_in_editor(self, filepath=None):
+        """用外部编辑器打开文件"""
+        import subprocess
+        if filepath is None:
+            sel = self.tree.selection()
+            if not sel:
+                return
+            vals = self.tree.item(sel[0], "values")
+            if not vals or vals[1] == "True" or vals[1] is True:
+                return  # 跳过文件夹
+            iid = vals[0]
+            from file_handler import DATA_DIR
+            filepath = os.path.join(DATA_DIR, f"{iid}.md")
+            if not os.path.exists(filepath):
+                return
+        try:
+            subprocess.Popen([self._editor_path, filepath],
+                             shell=True)
+        except Exception:
+            # 回退到默认记事本
+            subprocess.Popen(["notepad.exe", filepath], shell=True)
+
     def _build_tag_panel(self):
         """标签面板：可折叠的两个区块 —— 所有标签 + 当前文件标签"""
         self.tag_frame = tk.Frame(self.side_frame)
@@ -763,6 +817,10 @@ class IndeXarApp:
             self._expand_all_tags_section()
         else:
             body.pack_forget()
+            # 收起时容器切换到 expand 模式，填满剩余空间
+            ctr = self.tag_tags_container
+            ctr.pack_forget()
+            ctr.pack(fill=tk.BOTH, expand=True)
             header.configure(text=header.cget("text").replace("▼", "▶"))
             body._collapsed = True
 
@@ -774,6 +832,9 @@ class IndeXarApp:
         if not body._collapsed:
             return
         body.pack(fill=tk.BOTH, expand=True, before=ctr)
+        # 恢复容器为底部固定模式
+        ctr.pack_forget()
+        ctr.pack(fill=tk.X, side=tk.BOTTOM)
         header.configure(text=header.cget("text").replace("▶", "▼"))
         body._collapsed = False
 
@@ -938,7 +999,7 @@ class IndeXarApp:
     def _build_content_area(self, parent):
         """内容展示区（头部含文件名+搜索+主题切换）"""
         self.content_body = tk.Frame(parent)
-        self.content_body.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.content_body.grid(row=0, column=3, sticky="nsew")
 
         # ── 内容头部：文件名 | 搜索 + 主题切换 ──
         self.content_header = tk.Frame(self.content_body)
@@ -976,7 +1037,17 @@ class IndeXarApp:
             cursor="hand2",
             command=self._do_search,
         )
-        self.search_btn.pack(side=tk.LEFT, padx=(0, 8))
+        self.search_btn.pack(side=tk.LEFT, padx=(0, 4))
+
+        # 外部编辑器按钮
+        self.edit_btn = tk.Button(
+            header_right, text="编辑",
+            font=("Microsoft YaHei", 9),
+            relief=tk.FLAT, padx=6, pady=1,
+            cursor="hand2",
+            command=self._open_in_editor,
+        )
+        self.edit_btn.pack(side=tk.LEFT, padx=(0, 8))
 
         # 主题切换
         self.theme_frame = tk.Frame(header_right, cursor="hand2")
@@ -1073,7 +1144,7 @@ class IndeXarApp:
         self.status_left.pack(side=tk.LEFT)
 
         self.status_right = tk.Label(
-            self.statusbar, text="data/   ",
+            self.statusbar, text=f"字号: {self._font_size}   ",
             font=("Microsoft YaHei", 9), padx=10,
         )
         self.status_right.pack(side=tk.RIGHT)
@@ -1563,6 +1634,10 @@ class IndeXarApp:
             bg=c["toolbar_btn_bg"], fg=c["toolbar_btn_fg"],
             activebackground=c["toolbar_btn_hover"],
         )
+        self.edit_btn.configure(
+            bg=c["toolbar_btn_bg"], fg=c["toolbar_btn_fg"],
+            activebackground=c["toolbar_btn_hover"],
+        )
         self._update_theme_toggle()
 
         # ── 活动栏 ──
@@ -1595,6 +1670,12 @@ class IndeXarApp:
         )
         self.new_note_btn.configure(
             image=self._new_note_img,
+            bg=c["sidebar_header_bg"],
+            activebackground=c["sidebar_header_bg"],
+        )
+        self._refresh_img = icon_renderer.svg_icon("refresh.svg", c["sidebar_header_fg"])
+        self.refresh_btn.configure(
+            image=self._refresh_img,
             bg=c["sidebar_header_bg"],
             activebackground=c["sidebar_header_bg"],
         )
@@ -1734,6 +1815,8 @@ class IndeXarApp:
         self.new_folder_btn._nb_hover_bg = c["sidebar_item_selected"]
         self.new_note_btn._nb_normal_bg = c["sidebar_header_bg"]
         self.new_note_btn._nb_hover_bg = c["sidebar_item_selected"]
+        self.refresh_btn._nb_normal_bg = c["sidebar_header_bg"]
+        self.refresh_btn._nb_hover_bg = c["sidebar_item_selected"]
 
     # ══════════════════════════════════
     # 面板切换
@@ -1741,8 +1824,8 @@ class IndeXarApp:
 
     def _show_files(self):
         self.current_panel = "files"
-        self.tag_frame.pack_forget()
-        self.file_tree_frame.pack(fill=tk.BOTH, expand=True)
+        self.tag_frame.grid_remove()
+        self.file_tree_frame.grid(row=0, column=0, sticky="nsew")
         self._restore_sidebar_if_collapsed()
         self._update_nav_icons()
         self._refresh_file_tree()
@@ -1751,8 +1834,8 @@ class IndeXarApp:
 
     def _show_tags(self):
         self.current_panel = "tags"
-        self.file_tree_frame.pack_forget()
-        self.tag_frame.pack(fill=tk.BOTH, expand=True)
+        self.file_tree_frame.grid_remove()
+        self.tag_frame.grid(row=0, column=0, sticky="nsew")
         self._restore_sidebar_if_collapsed()
         self._update_nav_icons()
         self._refresh_tags()
@@ -2576,6 +2659,7 @@ class IndeXarApp:
         self._font_size = min(24, self._font_size + self._font_step)
         self._apply_font_size()
         self._save_settings()
+        self.status_right.configure(text=f"字号: {self._font_size}   ")
         self.status_left.configure(text=f"   字号: {self._font_size}")
 
     def _zoom_out(self):
@@ -2583,6 +2667,7 @@ class IndeXarApp:
         self._font_size = max(8, self._font_size - self._font_step)
         self._apply_font_size()
         self._save_settings()
+        self.status_right.configure(text=f"字号: {self._font_size}   ")
         self.status_left.configure(text=f"   字号: {self._font_size}")
 
     def _zoom_reset(self):
@@ -2590,6 +2675,7 @@ class IndeXarApp:
         self._font_size = 11
         self._apply_font_size()
         self._save_settings()
+        self.status_right.configure(text=f"字号: {self._font_size}   ")
         self.status_left.configure(text=f"   字号: {self._font_size}")
 
     def _apply_font_size(self):
@@ -2652,6 +2738,7 @@ class IndeXarApp:
                 self._font_size = new_size
                 self._apply_font_size()
                 self._save_settings()
+                self.status_right.configure(text=f"字号: {self._font_size}   ")
                 self.status_left.configure(text=f"   字号: {self._font_size}")
             except ValueError:
                 size_var.set(str(self._font_size))
@@ -2706,6 +2793,7 @@ class IndeXarApp:
             size_var.set("11")
             self._apply_font_size()
             self._save_settings()
+            self.status_right.configure(text="字号: 11   ")
             self.status_left.configure(text="   字号: 11")
 
         reset_btn = tk.Button(body, text="重置默认 (11)",
@@ -2754,16 +2842,14 @@ class IndeXarApp:
         """显示/隐藏侧栏"""
         if self._sidebar_width > 0:
             self._prev_sidebar_width = self._sidebar_width
-            self.side_frame.pack_forget()
-            self._grip.pack_forget()
+            self.side_frame.grid_remove()
+            self._grip.grid_remove()
             self._sidebar_width = 0
         else:
             self._sidebar_width = getattr(self, '_prev_sidebar_width', 240)
-            self.side_frame.pack(side=tk.LEFT, fill=tk.Y,
-                                 before=self.content_body)
+            self.side_frame.grid(row=0, column=1, sticky="ns")
             self.side_frame.configure(width=self._sidebar_width)
-            self._grip.pack(side=tk.LEFT, fill=tk.Y,
-                            before=self.content_body)
+            self._grip.grid(row=0, column=2, sticky="ns")
         self._save_settings()
 
     def _toggle_follow_system_theme(self):
@@ -2811,6 +2897,7 @@ class IndeXarApp:
                 s = json.load(f)
             if "font_size" in s:
                 self._font_size = int(s["font_size"])
+                self.status_right.configure(text=f"字号: {self._font_size}   ")
             if "theme_mode" in s and s["theme_mode"] in ("light", "dark"):
                 self.theme_mode = s["theme_mode"]
             if "follow_system_theme" in s:
@@ -2823,10 +2910,14 @@ class IndeXarApp:
                 self._apply_file_tags_visibility()
             if "file_tags_height" in s:
                 self._file_tags_height = int(s["file_tags_height"])
-                for p in ("file_", "tag_"):
-                    ctr = getattr(self, f"{p}tags_container", None)
-                    if ctr:
-                        ctr.configure(height=self._file_tags_height)
+                # 折叠状态下不覆盖容器高度（保持 28px）
+                if not self._file_tags_collapsed:
+                    for p in ("file_", "tag_"):
+                        ctr = getattr(self, f"{p}tags_container", None)
+                        if ctr:
+                            ctr.configure(height=self._file_tags_height)
+            if "editor_path" in s:
+                self._editor_path = s["editor_path"]
         except (json.JSONDecodeError, IOError, ValueError):
             pass  # 配置文件损坏时使用默认值
 
@@ -2839,6 +2930,7 @@ class IndeXarApp:
             "sidebar_width": self._sidebar_width,
             "file_tags_collapsed": self._file_tags_collapsed,
             "file_tags_height": self._file_tags_height,
+            "editor_path": self._editor_path,
         }
         try:
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:

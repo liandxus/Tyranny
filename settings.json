@@ -2,7 +2,8 @@
   "font_size": 11,
   "theme_mode": "light",
   "follow_system_theme": false,
-  "sidebar_width": 301,
-  "file_tags_collapsed": true,
-  "file_tags_height": 223
+  "sidebar_width": 303,
+  "file_tags_collapsed": false,
+  "file_tags_height": 146,
+  "editor_path": "notepad.exe"
 }
