@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import frontmatter
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 INDEX_FILE = os.path.join(os.path.dirname(__file__), "index.json")
@@ -279,49 +280,34 @@ def _build_tree(base_dir, prefix=""):
 # 标签系统
 # ══════════════════════════════════
 
+def parse_note_metadata(filepath):
+    """
+    使用 python-frontmatter 解析 Markdown 文件的 YAML 元数据。
+    返回 (metadata_dict, body_text)，解析失败返回 ({}, '')。
+    """
+    if not os.path.exists(filepath):
+        return {}, ""
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            post = frontmatter.load(f)
+        return dict(post.metadata), post.content
+    except Exception:
+        return {}, ""
+
+
 def parse_front_matter_tags(filepath):
     """
     从 Markdown 文件的 YAML front matter 中提取标签。
-    支持两种格式：
-      tags: [标签1, 标签2, 标签3]
-      tags:
-        - 标签1
-        - 标签2
-    返回标签列表（字符串列表）
+    返回标签列表（字符串列表）。
     """
-    if not os.path.exists(filepath):
+    metadata, _ = parse_note_metadata(filepath)
+    tags = metadata.get("tags", [])
+    # 确保 tags 是列表类型
+    if isinstance(tags, str):
+        tags = [tags]
+    if not isinstance(tags, list):
         return []
-    with open(filepath, "r", encoding="utf-8") as f:
-        content = f.read()
-    if not content.startswith("---"):
-        return []
-    end = content.find("---", 3)
-    if end == -1:
-        return []
-    front_matter = content[3:end]
-
-    # 格式1: tags: [tag1, tag2, tag3]
-    m = re.search(r'^tags:\s*\[(.+?)\]', front_matter, re.MULTILINE)
-    if m:
-        raw = m.group(1)
-        tags = [t.strip().strip('"\'') for t in raw.split(",")]
-        return [t for t in tags if t]
-
-    # 格式2: tags:\n  - tag1\n  - tag2
-    m = re.search(r'^tags:\s*$', front_matter, re.MULTILINE)
-    if m:
-        start = m.end()
-        tags = []
-        for line in front_matter[start:].split("\n"):
-            stripped = line.strip()
-            if stripped.startswith("- "):
-                tag = stripped[2:].strip().strip('"\'')
-                if tag:
-                    tags.append(tag)
-            elif stripped and not stripped.startswith("-"):
-                break  # 遇到其他字段停止
-        return tags
-    return []
+    return [str(t) for t in tags if t]
 
 
 def build_tag_index():
@@ -340,8 +326,17 @@ def build_tag_index():
     sorted_map = dict(
         sorted(tag_map.items(), key=lambda kv: (-len(kv[1]), kv[0]))
     )
+    # 读取现有索引，合并写入以保留 backlinks 等字段
+    merged = {}
+    if os.path.exists(INDEX_FILE):
+        try:
+            with open(INDEX_FILE, "r", encoding="utf-8") as f:
+                merged = json.load(f)
+        except Exception:
+            pass
+    merged["tags"] = sorted_map
     with open(INDEX_FILE, "w", encoding="utf-8") as f:
-        json.dump(sorted_map, f, ensure_ascii=False, indent=2)
+        json.dump(merged, f, ensure_ascii=False, indent=2)
     return sorted_map
 
 
@@ -351,7 +346,9 @@ def load_tag_index():
         return None
     try:
         with open(INDEX_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+        # 兼容旧格式（裸 JSON）和新格式（{"tags": {...}})
+        return data.get("tags", data)
     except (json.JSONDecodeError, IOError):
         return None
 
@@ -367,3 +364,67 @@ def get_tag_index(force_rebuild=False):
     if cached is not None:
         return cached
     return build_tag_index()
+
+
+# ══════════════════════════════════
+# 反向链接系统
+# ══════════════════════════════════
+
+def parse_wikilinks(content):
+    """从笔记正文中提取 [[目标]] 链接的目标名列表"""
+    links = []
+    for m in re.finditer(r'\[\[([^\[\]|]+)(?:\|([^\[\]]+))?\]\]', content):
+        target = m.group(1).strip().replace(".md", "")
+        if target:
+            links.append(target)
+    return links
+
+
+def build_backlink_index():
+    """
+    扫描 data/ 下所有 .md 文件，构建反向链接索引并写入 index.json。
+    返回 {被引用笔记名: [引用者路径, ...]}
+    """
+    backlinks = {}
+    for item in _walk(DATA_DIR):
+        filepath = os.path.join(DATA_DIR, f"{item['path']}.md")
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception:
+            continue
+        # 跳过 YAML front matter
+        if content.startswith("---"):
+            end = content.find("---", 3)
+            if end != -1:
+                content = content[end + 3:]
+        for target in parse_wikilinks(content):
+            backlinks.setdefault(target, []).append(item["path"])
+
+    # 合并写入 index.json，不覆盖 tags
+    merged = {}
+    if os.path.exists(INDEX_FILE):
+        try:
+            with open(INDEX_FILE, "r", encoding="utf-8") as f:
+                merged = json.load(f)
+        except Exception:
+            pass
+    merged["backlinks"] = backlinks
+    with open(INDEX_FILE, "w", encoding="utf-8") as f:
+        json.dump(merged, f, ensure_ascii=False, indent=2)
+    return backlinks
+
+
+def get_backlinks(note_name):
+    """
+    获取指定笔记的反向链接列表。
+    note_name: 笔记显示名（如 "README"），不含路径和 .md 后缀
+    """
+    if not os.path.exists(INDEX_FILE):
+        return []
+    try:
+        with open(INDEX_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("backlinks", {}).get(note_name, [])
+    except Exception:
+        return []

@@ -9,8 +9,9 @@ import ctypes
 import json
 import os
 import re
-from file_handler import list_notes, list_notes_tree, read_note, get_tag_index, build_tag_index
+from file_handler import list_notes, list_notes_tree, read_note, get_tag_index, build_tag_index, build_backlink_index
 from theme_manager import VSCodeTheme
+from editor_detect import detect_editors
 import icon_renderer
 from context_menu import ContextMenu
 
@@ -207,6 +208,8 @@ class IndeXarApp:
             ("文件", [
                 ("新建笔记", self._create_note),
                 ("新建文件夹", self._create_folder),
+                None,
+                ("设置…", self._open_settings),
                 None,
                 ("退出", self._on_close),
             ]),
@@ -959,6 +962,82 @@ class IndeXarApp:
             # 恢复选中状态
             self._sync_file_tag_selection(lb)
 
+    def _render_backlinks(self, rel_path):
+        """在内容底部使用 Text tag 渲染百科风格反向链接框"""
+        from file_handler import get_backlinks
+
+        name = rel_path.split("/")[-1]
+        backlinks = get_backlinks(name)
+        if not backlinks:
+            return
+
+        c = self.colors
+        is_dark = self.theme_mode == "dark"
+        fs = max(9, self._font_size - 1)
+
+        # ── 配色 ──
+        border = "#b8d4ec" if not is_dark else "#3a5068"
+        header_bg = "#d4e8f8" if not is_dark else "#203a50"
+        header_fg = "#1a5276" if not is_dark else "#7ab8f5"
+        box_bg = "#eaf4fb" if not is_dark else "#1a2d40"
+        link_fg = "#2a6e9e" if not is_dark else "#5ba4d6"
+        content_fg = c["content_fg"]
+
+        # ── 配置 tag ──
+        self.content_text.tag_configure("bl_top",
+            foreground=border, font=("Microsoft YaHei", 1),
+            spacing1=10, spacing3=0)
+        self.content_text.tag_configure("bl_header",
+            background=header_bg, foreground=header_fg,
+            font=("Microsoft YaHei", fs, "bold"),
+            lmargin1=14, lmargin2=14, spacing1=5, spacing3=4)
+        self.content_text.tag_configure("bl_body",
+            background=box_bg, foreground=content_fg,
+            font=("Microsoft YaHei", fs),
+            lmargin1=14, lmargin2=14)
+        self.content_text.tag_configure("bl_bottom",
+            background=box_bg, font=("Microsoft YaHei", 1),
+            lmargin1=14, lmargin2=14, spacing3=6)
+
+        self.content_text.configure(state=tk.NORMAL)
+
+        # ── 顶部边框线 ──
+        self.content_text.insert("end", "\n", "bl_top")
+
+        # ── 标题行 ──
+        count = len(backlinks)
+        self.content_text.insert("end", f"  被以下笔记引用 ({count})\n",
+                                 "bl_header")
+
+        # ── 链接项横向排列 ──
+        # 先插入前缀和第一个链接
+        self.content_text.insert("end", "  ", "bl_body")
+        for i, source_path in enumerate(backlinks):
+            source_name = source_path.split("/")[-1]
+            click_tag = f"bl_{source_path}"
+
+            # 分隔符（除第一个外）
+            if i > 0:
+                self.content_text.insert("end", " │ ", "bl_body")
+
+            # 链接文字
+            start = self.content_text.index("end-1c")
+            self.content_text.insert("end", source_name, "bl_body")
+            end = self.content_text.index("end-1c")
+
+            # 打上点击标签
+            self.content_text.tag_add(click_tag, start, end)
+            self.content_text.tag_configure(click_tag,
+                foreground=link_fg, underline=True,
+                font=("Microsoft YaHei", fs))
+            self.content_text.tag_bind(click_tag, "<Button-1>",
+                lambda e, p=source_path: self._display_note(p))
+
+        self.content_text.insert("end", "\n", "bl_body")
+
+        # ── 底部收尾 ──
+        self.content_text.insert("end", "\n", "bl_bottom")
+
     def _on_file_tag_dclick(self, event):
         """双击标签 → 跳转标签页定位"""
         lb = event.widget
@@ -1012,13 +1091,36 @@ class IndeXarApp:
             font=("Microsoft YaHei", 10),
             anchor=tk.W, padx=14, pady=6,
         )
-        self.content_title.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.content_title.pack(side=tk.LEFT)
 
-        # 右侧：搜索 + 主题
+        # 关闭按钮（浏览文件时出现）
+        self._close_file_btn = tk.Label(
+            self.content_header, text="✕",
+            font=("Microsoft YaHei", 11),
+            cursor="hand2", padx=2,
+        )
+        self._close_file_btn.bind("<Button-1>", lambda e: self._close_file())
+        self._close_file_btn.bind("<Enter>", lambda e: e.widget.configure(fg="#e81123"))
+        self._close_file_btn.bind("<Leave>", lambda e: e.widget.configure(fg="#888"))
+        self._close_file_btn.configure(fg="#888")
+
+        # 右侧：搜索 + 主题（先 pack RIGHT 确保不被推出）
         header_right = tk.Frame(self.content_header)
         header_right.pack(side=tk.RIGHT, padx=(0, 10))
 
+        # 分隔线（紧贴搜索区左侧）
+        self._header_sep = tk.Label(
+            self.content_header, text="│",
+            font=("Microsoft YaHei", 10),
+            padx=6, pady=6,
+        )
+        self._header_sep.pack(side=tk.RIGHT)
+
         self.search_var = tk.StringVar()
+        # 搜索框清空时自动恢复文件树
+        self.search_var.trace_add("write", lambda *a: (
+            self._refresh_file_tree() if not self.search_var.get().strip() and self.current_panel == "files" else None
+        ))
         self.search_entry = tk.Entry(
             header_right,
             textvariable=self.search_var,
@@ -1033,8 +1135,8 @@ class IndeXarApp:
         self.search_btn = tk.Button(
             header_right, text="搜索",
             font=("Microsoft YaHei", 9),
-            relief=tk.FLAT, padx=8, pady=1,
-            cursor="hand2",
+            relief=tk.RIDGE, bd=1, highlightthickness=0,
+            padx=8, pady=1, cursor="hand2",
             command=self._do_search,
         )
         self.search_btn.pack(side=tk.LEFT, padx=(0, 4))
@@ -1043,8 +1145,8 @@ class IndeXarApp:
         self.edit_btn = tk.Button(
             header_right, text="编辑",
             font=("Microsoft YaHei", 9),
-            relief=tk.FLAT, padx=6, pady=1,
-            cursor="hand2",
+            relief=tk.RIDGE, bd=1, highlightthickness=0,
+            padx=6, pady=1, cursor="hand2",
             command=self._open_in_editor,
         )
         self.edit_btn.pack(side=tk.LEFT, padx=(0, 8))
@@ -1072,6 +1174,9 @@ class IndeXarApp:
         self.theme_light_lbl.bind("<Button-1>", lambda e: self._toggle_theme())
         self.theme_dark_lbl.bind("<Button-1>", lambda e: self._toggle_theme())
 
+        # ── header 宽度变化时自动截断文件名 ──
+        self.content_header.bind("<Configure>", self._on_header_resize)
+
         # ── 文本内容区 ──
 
         self.text_container = tk.Frame(self.content_body)
@@ -1084,6 +1189,7 @@ class IndeXarApp:
             padx=20, pady=16,
             relief=tk.FLAT, highlightthickness=0,
             borderwidth=0, insertwidth=2,
+            cursor="",  # 只读内容区默认箭头，链接处才变手型
         )
         self.content_scroll = ttk.Scrollbar(
             self.text_container, orient=tk.VERTICAL,
@@ -1368,9 +1474,10 @@ class IndeXarApp:
         max_w = max(300, self.root.winfo_width() // 2)
         new_w = max(0, min(new_w, max_w))
 
-        # VSCode 风格：低于 100 直接收起，从收起状态拖出到 >20 则弹开到 180
+        # 拖到 <60 收起，收起后拖出 >20 弹开到 180
         MIN_OPEN = 180
-        if self._sidebar_width > 0 and new_w < 100:
+        COLLAPSE_THRESHOLD = 60
+        if self._sidebar_width > 0 and new_w < COLLAPSE_THRESHOLD:
             new_w = 0
         elif self._sidebar_width == 0 and new_w > 20:
             new_w = MIN_OPEN
@@ -1785,6 +1892,8 @@ class IndeXarApp:
         self.content_body.configure(bg=c["app_bg"], highlightbackground=c["app_bg"])
         self.content_header.configure(bg=c["content_header_bg"])
         self.content_title.configure(bg=c["content_header_bg"], fg=c["content_header_fg"])
+        self._close_file_btn.configure(bg=c["content_header_bg"])
+        self._header_sep.configure(bg=c["content_header_bg"], fg=c.get("border", "#ccc"))
         self.text_container.configure(bg=c["content_bg"], highlightbackground=c["content_bg"])
         self.content_text.configure(
             bg=c["content_bg"], fg=c["content_fg"],
@@ -1843,10 +1952,14 @@ class IndeXarApp:
         self._refresh_file_tags()
 
     def _restore_sidebar_if_collapsed(self):
-        """如果侧栏被拖到收起状态，恢复默认宽度"""
+        """如果侧栏被收起（拖拽或菜单隐藏），展开到记忆/默认宽度"""
         if self._sidebar_width < 50:
-            self._sidebar_width = 240
-            self.side_frame.configure(width=240)
+            self._sidebar_width = getattr(self, '_prev_sidebar_width', 240)
+            self.side_frame.configure(width=self._sidebar_width)
+            # 确保 grid 中可见（_toggle_sidebar 可能已 grid_remove）
+            if not self.side_frame.winfo_ismapped():
+                self.side_frame.grid(row=0, column=1, sticky="ns")
+                self._grip.grid(row=0, column=2, sticky="ns")
 
     def _create_note(self, default_dir=""):
         """弹出新建笔记对话框"""
@@ -2319,22 +2432,52 @@ class IndeXarApp:
         vals = self.tree.item(selected[0], "values")
         if not vals:
             return
-        # 搜索结果头部行
         if vals[0] == "__header__":
             return
+        # 搜索片段点击 → 跳转到内容中的关键词位置
+        if isinstance(vals[0], str) and vals[0].startswith("__snippet_"):
+            idx = int(vals[0].split("_")[-1])
+            self._jump_to_search_match(idx)
+            return
         iid, is_dir = vals[0], vals[1]
-        # 右键触发的选择变化 → 不 toggle 文件夹
         if getattr(self, '_right_clicking', False):
             self._right_clicking = False
             return
         if is_dir == "True" or is_dir is True:
-            # 点的是文件夹 — 切换展开/折叠
             if self.tree.item(selected[0], "open"):
                 self.tree.item(selected[0], open=False)
             else:
                 self.tree.item(selected[0], open=True)
             return
         self._display_note(iid)
+
+    def _jump_to_search_match(self, idx):
+        """在已渲染内容中查找第 idx 个关键词并滚动选中"""
+        kw = getattr(self, '_cur_keyword', '')
+        if not kw:
+            return
+        count = 0
+        pos = "1.0"
+        self.content_text.configure(state=tk.NORMAL)
+        while True:
+            pos = self.content_text.search(kw, pos, nocase=True,
+                                           stopindex=tk.END)
+            if not pos:
+                break
+            if count == idx:
+                line = int(pos.split(".")[0])
+                total = int(self.content_text.index("end-1c").split(".")[0])
+                frac = (line - 1) / max(total, 1)
+                self.content_text.yview_moveto(frac)
+                end = f"{pos}+{len(kw)}c"
+                self.content_text.tag_remove(tk.SEL, "1.0", tk.END)
+                self.content_text.tag_add(tk.SEL, pos, end)
+                self.content_text.see(pos)
+                self.content_text.configure(state=tk.DISABLED)
+                return
+            count += 1
+            pos = f"{pos}+1c"
+        self.content_text.configure(state=tk.DISABLED)
 
     # ══════════════════════════════════
     # 标签
@@ -2524,8 +2667,12 @@ class IndeXarApp:
             return
         self._current_note_path = rel_path
         name = rel_path.split("/")[-1]
-        self.content_title.configure(text=f"   📄 {name}.md")
+        self._full_display_name = f"   📄 {name}.md"
+        self._update_title_display()
+        self._close_file_btn.pack(side=tk.LEFT, padx=(0, 4))
         self._render_markdown(content)
+        self._render_backlinks(rel_path)
+        self.content_text.configure(state=tk.DISABLED)
         self.status_left.configure(text=f"   当前：{rel_path}.md")
         self._refresh_file_tags()
 
@@ -2535,7 +2682,6 @@ class IndeXarApp:
         render_markdown(self.content_text, md_text,
                          link_callback=self._navigate_to_link,
                          font_size=self._font_size)
-        self.content_text.configure(state=tk.DISABLED)
 
     def _on_content_click(self, event):
         """内容区点击——检测是否点在 wikilink 上"""
@@ -2549,27 +2695,36 @@ class IndeXarApp:
             pass
 
     def _on_content_motion(self, event):
-        """内容区鼠标移动——wikilink 上高亮 + 手型"""
+        """内容区鼠标移动——链接上手型光标 + 高亮（仅当前 tag）"""
         try:
             pos = self.content_text.index(f"@{event.x},{event.y}")
             tags = self.content_text.tag_names(pos)
-            has_link = any(t.startswith("wikilink_") for t in tags)
+            # 找到鼠标所在位置的具体链接 tag
+            link_tags = [t for t in tags if t.startswith("wikilink_")]
+            has_link = bool(link_tags)
 
-            # 切换鼠标指针 + 背景色
-            if has_link and not getattr(self, '_link_hover', False):
-                self._link_hover = True
-                self.content_text.config(cursor="arrow")
-                for tag in self.content_text.tag_names():
-                    if tag.startswith("wikilink_"):
-                        self.content_text.tag_configure(
-                            tag, background="#d6e4f0")
-            elif not has_link and getattr(self, '_link_hover', False):
+            hover_bg = "#d6e4f0" if self.theme_mode == "light" else "#2a4a6b"
+
+            # 离开上一个链接 → 还原其背景
+            prev = getattr(self, '_hovered_tag', None)
+            if prev and prev != (link_tags[0] if link_tags else None):
+                try:
+                    self.content_text.tag_configure(prev, background="")
+                except Exception:
+                    pass
+                self._hovered_tag = None
+
+            # 进入新链接
+            if link_tags:
+                tag = link_tags[0]
+                if not getattr(self, '_link_hover', False):
+                    self._link_hover = True
+                    self.content_text.config(cursor="hand2")
+                self.content_text.tag_configure(tag, background=hover_bg)
+                self._hovered_tag = tag
+            elif getattr(self, '_link_hover', False):
                 self._link_hover = False
-                self.content_text.config(cursor="xterm")
-                for tag in self.content_text.tag_names():
-                    if tag.startswith("wikilink_"):
-                        self.content_text.tag_configure(
-                            tag, background="")
+                self.content_text.config(cursor="")
         except Exception:
             pass
 
@@ -2595,9 +2750,40 @@ class IndeXarApp:
                 f"请确认 data/ 目录下是否存在该名称的 .md 文件。"
             )
 
+    def _update_title_display(self, event=None):
+        """根据 header 可用宽度动态截断文件名"""
+        full = getattr(self, '_full_display_name', None)
+        if not full:
+            return
+        # 估算可用宽度：header 宽度 - 右侧搜索区 (~380px) - 间距
+        avail = self.content_header.winfo_width() - 400
+        ch_w = 9  # 中文约 17px, 英文约 9px, 粗略取 10
+        max_ch = max(10, avail // ch_w)
+        if len(full) <= max_ch:
+            self.content_title.configure(text=full)
+        else:
+            self.content_title.configure(text=full[:max_ch-3] + "...")
+
+    def _on_header_resize(self, event):
+        self._update_title_display()
+
+    def _close_file(self):
+        """关闭当前浏览的文件，回到欢迎页"""
+        self._current_note_path = None
+        self._full_display_name = None
+        self._close_file_btn.pack_forget()
+        self._refresh_file_tags()
+        self.content_title.configure(text="   选择一篇笔记开始阅读")
+        self.content_text.configure(state=tk.NORMAL)
+        self.content_text.delete(1.0, tk.END)
+        self.content_text.configure(state=tk.DISABLED)
+        self.status_left.configure(text="   就绪")
+
     def _set_content(self, text):
         self._current_note_path = None
+        self._close_file_btn.pack_forget()
         self._refresh_file_tags()
+        self.content_title.configure(text="   选择一篇笔记开始阅读")
         self.content_text.configure(state=tk.NORMAL)
         self.content_text.delete(1.0, tk.END)
         self.content_text.insert(tk.END, text)
@@ -2609,33 +2795,130 @@ class IndeXarApp:
 
     def _do_search(self):
         keyword = self.search_var.get().strip()
+        keyword_lower = keyword.lower()
         if not keyword:
             return
-        from search_engine import search_notes
-        results = search_notes(keyword)
 
-        # 如果当前不是文件面板，切过去并刷新
+        from file_handler import list_notes, read_note
+
         if self.current_panel != "files":
             self._show_files()
-        # 清空树
         for item in self.tree.get_children():
             self.tree.delete(item)
 
-        if not results:
-            self.tree.insert("", "end", text=f"   🔍 未找到 \"{keyword}\"")
+        all_notes = list_notes()
+        cur = self._current_note_path
+
+        name_matches = []
+        content_matches = []
+        cur_hit_count = 0
+
+        for rel_path in all_notes:
+            name = rel_path.split("/")[-1].lower()
+            name_hit = keyword_lower in name
+            content = read_note(rel_path) or ""
+            if content.startswith("---"):
+                end = content.find("---", 3)
+                if end != -1:
+                    content = content[end + 3:]
+            content_hit = keyword_lower in content.lower()
+
+            if name_hit:
+                name_matches.append(rel_path)
+            elif content_hit:
+                content_matches.append(rel_path)
+
+            if rel_path == cur and content_hit:
+                cur_hit_count = self._count_matches(keyword_lower)
+
+        total = len(name_matches) + len(content_matches)
+        if total == 0 and cur_hit_count == 0:
+            self.tree.insert("", "end", text=f"  未找到 \"{keyword}\"")
             self._set_content(f"未找到包含 \"{keyword}\" 的笔记。")
             self.status_left.configure(text="   未找到结果")
             return
 
+        total += cur_hit_count
         self.tree.insert("", "end",
-                         text=f"   🔍 \"{keyword}\" ({len(results)} 条)",
-                         values=("__header__",))
-        for rel_path, _ in results:
-            name = rel_path.split("/")[-1]
-            self.tree.insert("", "end", text=f"  📄 {name}",
-                             values=(rel_path, False))
-        self._set_content(f"🔍 搜索 \"{keyword}\" 找到 {len(results)} 条结果")
-        self.status_left.configure(text=f"   {len(results)} 条结果")
+            text=f"  搜索结果 \"{keyword}\" ({total})",
+            values=("__header__",), open=True)
+
+        # ① 当前文件
+        if cur_hit_count > 0 and cur:
+            piid = self.tree.insert("", "end",
+                text=f"  当前文件 ({cur_hit_count})", open=True,
+                values=("__header__",))
+            # 提取每个匹配位的小段摘要
+            snippets = self._extract_text_snippets(keyword_lower)
+            for i, snip_text in enumerate(snippets[:cur_hit_count]):
+                self.tree.insert(piid, "end",
+                    text=f"[{i+1}] {snip_text}",
+                    values=(f"__snippet_{i}",))
+            if cur in name_matches:
+                name_matches.remove(cur)
+            if cur in content_matches:
+                content_matches.remove(cur)
+
+        # ② 文件名匹配
+        if name_matches:
+            piid = self.tree.insert("", "end",
+                text=f"  文件名匹配 ({len(name_matches)})", open=True,
+                values=("__header__",))
+            for p in name_matches:
+                self.tree.insert(piid, "end", text=p.split("/")[-1],
+                    values=(p, False))
+
+        # ③ 内容匹配
+        if content_matches:
+            piid = self.tree.insert("", "end",
+                text=f"  内容匹配 ({len(content_matches)})", open=True,
+                values=("__header__",))
+            for p in content_matches:
+                self.tree.insert(piid, "end", text=p.split("/")[-1],
+                    values=(p, False))
+
+        self._cur_keyword = keyword_lower
+        self._cur_hit_count = cur_hit_count
+        self.status_left.configure(text=f"   结果 {total}")
+
+    def _count_matches(self, keyword):
+        """统计已渲染内容中关键词出现次数"""
+        count = 0
+        pos = "1.0"
+        while True:
+            pos = self.content_text.search(keyword, pos, nocase=True,
+                                           stopindex=tk.END)
+            if not pos:
+                break
+            count += 1
+            pos = f"{pos}+1c"
+        return count
+
+    def _extract_text_snippets(self, keyword, max_count=10):
+        """从已渲染内容中提取关键词短片段（前后各6字 + 省略号）"""
+        results = []
+        pos = "1.0"
+        ctx = 6
+        while True:
+            pos = self.content_text.search(keyword, pos, nocase=True,
+                                           stopindex=tk.END)
+            if not pos:
+                break
+            # 提取前后各 ctx 字符
+            start = f"{pos}-{ctx}c"
+            end = f"{pos}+{len(keyword)+ctx}c"
+            s = self.content_text.get(start, end).replace("\n", " ").strip()
+            # 添加省略号
+            if self.content_text.compare(start, ">", "1.0"):
+                s = "..." + s
+            if self.content_text.compare(end, "<", "end-1c"):
+                s = s + "..."
+            if s not in results:
+                results.append(s)
+            pos = f"{pos}+1c"
+            if len(results) >= max_count:
+                break
+        return results
 
     # ══════════════════════════════════
     # 视图菜单
@@ -2685,6 +2968,239 @@ class IndeXarApp:
         # 如果有当前打开的文件，重新渲染
         if hasattr(self, '_current_note_path') and self._current_note_path:
             self._display_note(self._current_note_path)
+
+    def _open_settings(self):
+        """打开集成设置面板（左分类 + 右内容，可拖动分隔）"""
+        c = self.colors
+        W, H = 600, 420
+        is_dark = self.theme_mode == "dark"
+        win_border = "#555555" if is_dark else "#777777"
+        # 标题栏用活动栏配色
+        bar_bg = c["nav_bg"]
+        bar_fg = c["nav_fg"]
+        bar_btn_hover = "#e81123" if not is_dark else "#c03333"
+
+        dialog = tk.Toplevel(self.root)
+        dialog.overrideredirect(True)
+        dialog.configure(bg=c["sidebar_bg"], highlightthickness=1,
+                         highlightbackground=win_border)
+        dialog.minsize(400, 280)
+
+        # ── 标题栏 ──
+        bar = tk.Frame(dialog, height=28, bg=bar_bg)
+        bar.pack(fill=tk.X, side=tk.TOP)
+        bar.pack_propagate(False)
+        tk.Label(bar, text="  设置", font=("Microsoft YaHei", 10),
+                 anchor=tk.W, bg=bar_bg, fg=bar_fg
+                 ).pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tk.Button(bar, text="✕", font=("Segoe UI", 9),
+                  relief=tk.FLAT, bd=0, padx=8, command=dialog.destroy,
+                  bg=bar_bg, fg=bar_fg,
+                  activebackground=bar_btn_hover, activeforeground="#ffffff"
+                  ).pack(side=tk.RIGHT, fill=tk.Y)
+
+        # 拖拽
+        def _drag_start(e):
+            dialog._dx, dialog._dy = e.x_root, e.y_root
+        def _drag_move(e):
+            dialog.geometry(
+                f"+{dialog.winfo_x() + e.x_root - dialog._dx}"
+                f"+{dialog.winfo_y() + e.y_root - dialog._dy}")
+            dialog._dx, dialog._dy = e.x_root, e.y_root
+        for w in (bar, bar.winfo_children()[0]):
+            w.bind("<Button-1>", _drag_start)
+            w.bind("<B1-Motion>", _drag_move)
+
+        # ── 主体：PanedWindow 原生可分栏 ──
+        pane = ttk.PanedWindow(dialog, orient=tk.HORIZONTAL)
+        pane.pack(fill=tk.BOTH, expand=True)
+        # Sash 样式
+        s = ttk.Style()
+        s.configure("TPanedwindow", background=c["sidebar_bg"])
+        s.configure("sash.TPanedwindow", sashthickness=4,
+                    sashrelief=tk.FLAT, background="#999" if not is_dark else "#666")
+
+        # 左侧略深，与右侧形成对比
+        left_bg = "#dddddd" if not is_dark else "#1e1e1e"
+        left = tk.Frame(pane, bg=left_bg, width=W // 2)
+        right = tk.Frame(pane, bg=c["sidebar_bg"], padx=20, pady=12)
+        pane.add(left, weight=1)
+        pane.add(right, weight=3)
+
+        # ── 右侧内容区（动态切换） ──
+        self._settings_content = None
+        editors = detect_editors()
+
+        def _show_category(name):
+            if self._settings_content:
+                self._settings_content.destroy()
+            self._settings_content = tk.Frame(right, bg=c["sidebar_bg"])
+            self._settings_content.pack(fill=tk.BOTH, expand=True)
+            ct = self._settings_content
+            lf = ("Microsoft YaHei", 10)
+
+            if name == "通用":
+                tk.Label(ct, text="字号", anchor=tk.W, font=lf,
+                         bg=c["sidebar_bg"], fg=c["sidebar_fg"]
+                         ).pack(fill=tk.X, pady=(0, 6))
+                sz = tk.Frame(ct, bg=c["sidebar_bg"])
+                sz.pack(fill=tk.X)
+                sv = tk.StringVar(value=str(self._font_size))
+                for txt, d in [("−", -1), ("+", 1)]:
+                    b = tk.Button(sz, text=txt, font=("Microsoft YaHei", 9, "bold"),
+                                  width=2, relief=tk.RIDGE, bd=1,
+                                  command=lambda sv=sv, d=d: _delta_size(sv, d))
+                    b.pack(side=tk.RIGHT, padx=(4, 0))
+                    b.configure(bg=c["toolbar_btn_bg"], fg=c["toolbar_btn_fg"],
+                                activebackground=c["toolbar_btn_hover"])
+                e = tk.Entry(sz, textvariable=sv, font=lf, width=6,
+                             justify=tk.CENTER, relief=tk.FLAT, bd=0,
+                             highlightthickness=1)
+                e.pack(side=tk.RIGHT, padx=(0, 8))
+                e.configure(bg=c["content_bg"], fg=c["content_fg"],
+                            highlightbackground=c["search_border"])
+
+            elif name == "外观":
+                tk.Label(ct, text="主题模式", anchor=tk.W, font=lf,
+                         bg=c["sidebar_bg"], fg=c["sidebar_fg"]
+                         ).pack(fill=tk.X, pady=(0, 8))
+                themes = ["亮色", "暗色"]
+                themes_map = {"亮色": "light", "暗色": "dark"}
+                tv = tk.StringVar(value="亮色" if self.theme_mode == "light" else "暗色")
+                cb = ttk.Combobox(ct, textvariable=tv, values=themes,
+                                  state="readonly", font=lf, width=12)
+                cb.pack(anchor=tk.W)
+                cb.bind("<<ComboboxSelected>>", lambda e: (
+                    setattr(self, 'theme_mode', themes_map[tv.get()]),
+                    setattr(self, 'colors', VSCodeTheme.get(themes_map[tv.get()])),
+                    self._apply_theme(),
+                    self._save_settings(),
+                ))
+
+            elif name == "编辑器":
+                tk.Label(ct, text="外部编辑器", anchor=tk.W, font=lf,
+                         bg=c["sidebar_bg"], fg=c["sidebar_fg"]
+                         ).pack(fill=tk.X, pady=(0, 8))
+                names = list(editors.keys())
+                ev = tk.StringVar()
+                cur = "记事本"
+                for n, p in editors.items():
+                    if p == self._editor_path:
+                        cur = n
+                        break
+                ev.set(cur if cur in names else names[0])
+                cb = ttk.Combobox(ct, textvariable=ev, values=names,
+                                  state="readonly", font=lf, width=20)
+                cb.pack(anchor=tk.W)
+                cb.bind("<<ComboboxSelected>>",
+                        lambda e: (
+                            setattr(self, '_editor_path',
+                                    editors.get(ev.get(), self._editor_path)),
+                            self._save_settings(),
+                        ))
+
+        def _delta_size(sv, d):
+            try:
+                cur = int(sv.get())
+            except ValueError:
+                cur = self._font_size
+            cur = max(8, min(24, cur + d))
+            sv.set(str(cur))
+            self._font_size = cur
+            self._apply_font_size()
+            self._save_settings()
+
+        # ── 左侧分类列表 ──
+        categories = ["通用", "外观", "编辑器"]
+        self._settings_cat_labels = []
+        for i, cat_name in enumerate(categories):
+            lbl = tk.Label(left, text=f"  {cat_name}",
+                           font=("Microsoft YaHei", 10),
+                           bg=left_bg, fg=c["sidebar_fg"],
+                           anchor=tk.W, padx=12, pady=8, cursor="hand2")
+            lbl.pack(fill=tk.X)
+            lbl.bind("<Button-1>", lambda e, n=cat_name, l=None: (
+                _highlight_cat(n), _show_category(n)))
+            self._settings_cat_labels.append((lbl, cat_name))
+
+        def _highlight_cat(name):
+            for lbl, cat in self._settings_cat_labels:
+                is_sel = cat == name
+                lbl.configure(
+                    bg=c["sidebar_item_selected"] if is_sel else left_bg,
+                    fg=c["sidebar_fg"],
+                )
+
+        # 默认选中第一个
+        _highlight_cat("通用")
+        _show_category("通用")
+
+
+
+        # ── 窗口缩放（仅鼠标在对话框内生效）──
+        def _in_dialog(e):
+            x1, y1 = dialog.winfo_rootx(), dialog.winfo_rooty()
+            return x1 <= e.x_root <= x1 + dialog.winfo_width() and \
+                   y1 <= e.y_root <= y1 + dialog.winfo_height()
+
+        def _edge_region(e):
+            w, h = dialog.winfo_width(), dialog.winfo_height()
+            rx, ry = dialog.winfo_rootx(), dialog.winfo_rooty()
+            x, y = e.x_root - rx, e.y_root - ry
+            L = x <= 6; R = x >= w - 6; T = y <= 6; B = y >= h - 6
+            if T and L: return "nw"
+            if T and R: return "ne"
+            if B and L: return "sw"
+            if B and R: return "se"
+            if L: return "w"
+            if R: return "e"
+            if T: return "n"
+            if B: return "s"
+            return ""
+        cursors = {"n":"size_ns","s":"size_ns","e":"size_we","w":"size_we",
+                    "ne":"size_ne_sw","nw":"size_nw_se","se":"size_nw_se","sw":"size_ne_sw"}
+        dialog.bind("<Motion>", lambda e: dialog.config(
+            cursor=cursors.get(_edge_region(e), "") if _in_dialog(e) else ""), add="+")
+        def _start(e):
+            if not _in_dialog(e): return
+            r = _edge_region(e)
+            if not r: return
+            dialog._rs = {"r":r, "mx":e.x_root, "my":e.y_root,
+                          "wx":dialog.winfo_x(), "wy":dialog.winfo_y(),
+                          "ww":dialog.winfo_width(), "wh":dialog.winfo_height()}
+        def _do(e):
+            rs = getattr(dialog, '_rs', None)
+            if rs is None: return
+            r = rs["r"]
+            dx = e.x_root - rs["mx"]; dy = e.y_root - rs["my"]
+            x, y, w, h = rs["wx"], rs["wy"], rs["ww"], rs["wh"]
+            if "w" in r: x += dx; w -= dx
+            if "e" in r: w += dx
+            if "n" in r: y += dy; h -= dy
+            if "s" in r: h += dy
+            if w < 400: w = 400; x = rs["wx"] + rs["ww"] - 400 if "w" in r else x
+            if h < 280: h = 280; y = rs["wy"] + rs["wh"] - 280 if "n" in r else y
+            dialog.geometry(f"{int(w)}x{int(h)}+{int(x)}+{int(y)}")
+        dialog.bind("<Button-1>", _start, add="+")
+        dialog.bind("<B1-Motion>", _do, add="+")
+        dialog.bind("<ButtonRelease-1>", lambda e: setattr(dialog, '_rs', None), add="+")
+
+        # ── 居中（topmost → grab → update → geometry，与其他二级窗口一致）──
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        x, y = (sw - W) // 2, (sh - H) // 2
+        dialog.attributes('-topmost', True)
+        dialog.grab_set()
+        dialog.update_idletasks()
+        dialog.geometry(f"{W}x{H}+{int(x)}+{int(y)}")
+        try:
+            ctypes.windll.user32.MoveWindow(
+                dialog.winfo_id(), x, y, W, H, True)
+        except Exception:
+            pass
+        dialog.lift()
+        dialog.focus_force()
+        dialog.bind("<Escape>", lambda e: dialog.destroy())
 
     def _open_font_dialog(self):
         """打开字号设置弹窗（+/- 按钮 + 输入 + 重置）"""
@@ -2948,6 +3464,6 @@ class IndeXarApp:
         self.root.destroy()
 
     def run(self):
-        # 启动时构建标签索引（后台，不阻塞 UI）
-        self.root.after(100, lambda: build_tag_index())
+        # 启动时构建标签及反向链接索引（后台，不阻塞 UI）
+        self.root.after(100, lambda: (build_tag_index(), build_backlink_index()))
         self.root.mainloop()
