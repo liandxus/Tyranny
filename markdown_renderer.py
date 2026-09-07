@@ -7,6 +7,9 @@ import re
 from html.parser import HTMLParser
 from html import unescape
 
+import tkinter as tk
+from tkinter import ttk
+
 import markdown
 
 
@@ -22,8 +25,15 @@ def render_markdown(text_widget, md_text, link_callback=None, font_size=11):
     """
     text_widget.delete(1.0, "end")
 
-    # 清理上一次渲染留下的动态 wikilink 标签，防止颜色残留
+    # 清理上一次渲染留下的动态链接标签，防止颜色残留
     _cleanup_dynamic_tags(text_widget)
+    # 重置外链映射，并依背景预计算外链颜色
+    text_widget._extlink_map = {}
+    try:
+        _ext_dark = _is_dark_color(text_widget.cget("bg"))
+    except Exception:
+        _ext_dark = False
+    text_widget._ext_fg = "#5aa2e8" if _ext_dark else "#0b5cad"
 
     # 跳过 YAML front matter
     if md_text.startswith("---"):
@@ -78,8 +88,9 @@ class _MarkdownHTMLRenderer(HTMLParser):
         self.link_cb = link_callback
         self.fs = font_size
 
-        # 行内样式栈：元素为 'bold'|'italic'|'code_inline'|('wikilink', target)
+        # 行内样式栈：元素为 'bold'|'italic'|'code_inline'|('wikilink', target)|('extlink', url)
         self._stack = []
+        self._ext_idx = 0  # 外部链接动态 tag 计数器
 
         # ── 代码块状态 ──
         self._in_pre = False
@@ -144,6 +155,8 @@ class _MarkdownHTMLRenderer(HTMLParser):
             if href.startswith('wikilink:'):
                 target = href[9:]
                 self._stack.append(('wikilink', target))
+            elif href.startswith(('http://', 'https://')):
+                self._stack.append(('extlink', href))
 
         # ── 块级元素 ──（先清栈确保无残留 tag）
         elif tag in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
@@ -216,7 +229,7 @@ class _MarkdownHTMLRenderer(HTMLParser):
             elif tag in ('del', 's'):
                 self._pop_str('strikethrough')
             elif tag == 'a':
-                self._pop_wikilink()
+                self._pop_anchor()
             return
 
         # ── 行内样式（弹栈）──
@@ -229,7 +242,7 @@ class _MarkdownHTMLRenderer(HTMLParser):
         elif tag in ('del', 's'):
             self._pop_str('strikethrough')
         elif tag == 'a':
-            self._pop_wikilink()
+            self._pop_anchor()
 
         # ── 块级元素收尾 ──
         elif tag in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
@@ -281,6 +294,18 @@ class _MarkdownHTMLRenderer(HTMLParser):
                     self.w.tag_configure(tag_name,
                         foreground="#569cd6", underline=True,
                         font=("Microsoft YaHei", self.fs))
+            elif isinstance(s, tuple) and s[0] == 'extlink':
+                tag_name = f'extlink_{self._ext_idx}'
+                self._ext_idx += 1
+                tags.append(tag_name)
+                self.w.tag_configure(
+                    tag_name,
+                    foreground=getattr(self.w, "_ext_fg", "#0b5cad"),
+                    underline=True)
+                # 记录 URL，供 GUI 点击时打开
+                if not hasattr(self.w, "_extlink_map"):
+                    self.w._extlink_map = {}
+                self.w._extlink_map[tag_name] = s[1]
             else:
                 tags.append(s)
 
@@ -296,10 +321,12 @@ class _MarkdownHTMLRenderer(HTMLParser):
                 self._stack.pop(i)
                 return
 
-    def _pop_wikilink(self):
-        """从样式栈中移除最近的 wikilink 样式"""
+    def _pop_anchor(self):
+        """从样式栈中移除最近的 wikilink 或 extlink 样式"""
         for i in range(len(self._stack) - 1, -1, -1):
-            if isinstance(self._stack[i], tuple) and self._stack[i][0] == 'wikilink':
+            s = self._stack[i]
+            if (isinstance(s, tuple)
+                    and s[0] in ('wikilink', 'extlink')):
                 self._stack.pop(i)
                 return
 
@@ -482,10 +509,11 @@ def _is_dark_color(hex_color):
 
 
 def _cleanup_dynamic_tags(text_widget):
-    """删除上一次渲染残留的动态 wikilink 标签，防止主题切换后颜色错乱"""
+    """删除上一次渲染残留的动态 wikilink/extlink 标签，防止主题切换后颜色错乱"""
     for tag in list(text_widget.tag_names()):
-        if tag.startswith("wikilink_"):
+        if tag.startswith("wikilink_") or tag.startswith("extlink_"):
             text_widget.tag_delete(tag)
+    text_widget._extlink_map = {}
 
 
 # ══════════════════════════════════

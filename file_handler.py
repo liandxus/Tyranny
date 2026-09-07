@@ -23,6 +23,19 @@ def list_notes_tree():
     return _build_tree(DATA_DIR)
 
 
+def collect_mtimes():
+    """返回 {rel_path: mtime}，枚举 data 下所有 .md 的修改时间，
+    用于文件监听轮询对比。"""
+    result = {}
+    for item in _walk(DATA_DIR):
+        filepath = os.path.join(DATA_DIR, f"{item['path']}.md")
+        try:
+            result[item["path"]] = os.path.getmtime(filepath)
+        except OSError:
+            pass
+    return result
+
+
 NOTE_NAME_MAP = None  # 懒加载：{显示名: 相对路径}
 
 
@@ -308,6 +321,29 @@ def parse_front_matter_tags(filepath):
     if not isinstance(tags, list):
         return []
     return [str(t) for t in tags if t]
+
+
+def set_note_tags(rel_path, tags):
+    """
+    设置笔记 front matter 的 tags 字段（保留其他元数据与正文）。
+    返回写入后的标签列表；文件不存在或解析失败返回 None。
+    """
+    filepath = os.path.join(DATA_DIR, f"{rel_path}.md")
+    if not os.path.exists(filepath):
+        return None
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            post = frontmatter.load(f)
+        clean = [str(t).strip() for t in tags if str(t).strip()]
+        # 去重但保持顺序
+        seen = set()
+        clean = [t for t in clean if not (t in seen or seen.add(t))]
+        post.metadata["tags"] = clean
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(frontmatter.dumps(post))
+        return clean
+    except Exception:
+        return None
 
 
 def build_tag_index():

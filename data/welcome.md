@@ -1,7 +1,9 @@
 ---
-title: 欢迎使用 IndeXar
-tags: [入门, 档案]
 created: 2026-05-06
+tags:
+- 入门
+- 档案
+title: 欢迎使用 IndeXar
 ---
 
 # 欢迎使用 IndeXar

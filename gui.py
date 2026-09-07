@@ -45,7 +45,7 @@ class IndeXarApp:
 
     ICONS = {"light": {"sun": "☀️", "moon": "🌙"},
              "dark": {"sun": "☀️", "moon": "🌙"}}
-
+    
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("IndeXar")
@@ -184,8 +184,8 @@ class IndeXarApp:
         self.statusbar.grid_propagate(False)
         self._build_statusbar_widgets()
 
-        # 默认显示文件树
-        self._show_files()
+        # 默认显示文件树（toggle=False 防止误收起侧栏）
+        self._show_files(toggle=False)
 
     # ── 自定义标题栏 ──
 
@@ -196,11 +196,12 @@ class IndeXarApp:
         bar.grid_propagate(False)
         self.titlebar = bar
 
-        # ── 应用图标 ──（后续替换: self._logo_img = icon_renderer.svg_icon("logo.svg", ...)）
-        self._logo_img = None  # 占位
-        self.title_icon = tk.Label(bar, text="📁", font=("Segoe UI", 11),
-                                   padx=12, pady=2)
-        self.title_icon.pack(side=tk.LEFT)
+        # ── 应用图标（亮/暗主题 PNG）──
+        self._logo_img = None
+        self.title_icon = tk.Label(bar, text="",
+                                   padx=6, pady=2)
+        self.title_icon.pack(side=tk.LEFT, padx=(2, 20))
+        self._update_title_logo()
 
         # ── 菜单栏 ──
         self._menu_labels = []  # 用于拖拽绑定
@@ -270,6 +271,21 @@ class IndeXarApp:
             widget.bind("<B1-Motion>", self._do_drag)
             widget.bind("<Double-Button-1>",
                         lambda e: self._toggle_maximize())
+
+    def _update_title_logo(self):
+        """加载当前主题对应的应用图标 PNG"""
+        import os
+        fname = ("light_16.png" if self.theme_mode == "light"
+                 else "dark_16.png")
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "assets", fname)
+        if not os.path.exists(path):
+            return
+        try:
+            self._logo_img = tk.PhotoImage(file=path)
+            self.title_icon.configure(image=self._logo_img)
+        except tk.TclError:
+            pass
 
     def _make_title_btn(self, parent, text, size, cmd):
         """创建标题栏按钮"""
@@ -633,6 +649,7 @@ class IndeXarApp:
                     rename_note(iid, new_name)
                 dialog.destroy()
                 self._refresh_file_tree()
+                self._snapshot_files()  # 抑制轮询自触发
 
         tk.Button(btn_frame, text="确认", font=("Microsoft YaHei", 9),
                   command=do_rename).pack(side=tk.RIGHT)
@@ -666,6 +683,7 @@ class IndeXarApp:
                 from file_handler import delete_note
                 delete_note(iid)
             self._refresh_file_tree()
+            self._snapshot_files()  # 抑制轮询自触发
             self._set_content("")
 
     def _tree_context_reveal(self):
@@ -685,6 +703,18 @@ class IndeXarApp:
         if os.path.exists(target):
             import subprocess
             subprocess.run(["explorer", "/select,", os.path.normpath(target)])
+
+    def _open_current_in_editor(self):
+        """顶部'编辑'按钮：打开当前正在浏览的笔记"""
+        if not self._current_note_path:
+            self.status_left.configure(text="   请先打开一篇笔记")
+            return
+        from file_handler import DATA_DIR
+        filepath = os.path.join(DATA_DIR, f"{self._current_note_path}.md")
+        if not os.path.exists(filepath):
+            self.status_left.configure(text="   找不到笔记文件")
+            return
+        self._open_in_editor(filepath)
 
     def _open_in_editor(self, filepath=None):
         """用外部编辑器打开文件"""
@@ -871,6 +901,22 @@ class IndeXarApp:
         body = tk.Frame(container, bd=0, highlightthickness=0)
         body.pack(fill=tk.BOTH, expand=True)
 
+        # 标签工具条：＋ 添加 / － 删除
+        toolbar = tk.Frame(body, bd=0, highlightthickness=0)
+        toolbar.pack(fill=tk.X, padx=8, pady=(2, 0))
+        add_btn = tk.Label(toolbar, text="＋ 添加标签",
+                           font=("Microsoft YaHei", 9),
+                           cursor="hand2", padx=2)
+        add_btn.pack(side=tk.LEFT)
+        del_btn = tk.Label(toolbar, text="－ 删除所选",
+                           font=("Microsoft YaHei", 9),
+                           cursor="hand2", padx=6)
+        del_btn.pack(side=tk.LEFT)
+        add_btn.bind("<Button-1>",
+                     lambda e, pf=prefix: self._add_current_file_tag(pf))
+        del_btn.bind("<Button-1>",
+                     lambda e, pf=prefix: self._remove_selected_file_tag(pf))
+
         listbox = tk.Listbox(body,
                              font=("Microsoft YaHei", 10),
                              relief=tk.FLAT, highlightthickness=0,
@@ -883,6 +929,7 @@ class IndeXarApp:
 
         setattr(self, f"{prefix}tags_header", header)
         setattr(self, f"{prefix}tags_body", body)
+        setattr(self, f"{prefix}tags_toolbar", toolbar)
         setattr(self, f"{prefix}tags_listbox", listbox)
 
     # ── 拖拽调整标签区块高度 ──
@@ -961,6 +1008,103 @@ class IndeXarApp:
                     lb.insert(tk.END, f"  {t}")
             # 恢复选中状态
             self._sync_file_tag_selection(lb)
+
+    def _ask_single_line(self, title, prompt, initial=""):
+        """简易单行输入对话框（跟随主题），返回输入字符串或 None"""
+        result = [None]
+        dialog = self._make_dialog(self.root, title, 380, 150)
+        self._theme_dialog_body(dialog)
+        c = self.colors
+        body = tk.Frame(dialog, bg=c["sidebar_bg"])
+        body.pack(fill=tk.BOTH, expand=True, padx=20, pady=16)
+        tk.Label(body, text=prompt, bg=c["sidebar_bg"],
+                 fg=c["sidebar_fg"], font=("Microsoft YaHei", 10),
+                 anchor=tk.W).pack(fill=tk.X, pady=(0, 8))
+        var = tk.StringVar(value=initial)
+        entry = tk.Entry(body, textvariable=var,
+                         font=("Microsoft YaHei", 10),
+                         relief=tk.SUNKEN,
+                         bg=c["search_bg"], fg=c["search_fg"],
+                         insertbackground=c["search_fg"])
+        entry.pack(fill=tk.X, pady=(0, 14))
+        entry.focus_set()
+        entry.select_range(0, tk.END)
+        btns = tk.Frame(body, bg=c["sidebar_bg"])
+        btns.pack(fill=tk.X)
+
+        def ok():
+            result[0] = var.get().strip()
+            dialog.destroy()
+
+        tk.Button(btns, text="确定", font=("Microsoft YaHei", 9),
+                  bg=c["toolbar_btn_bg"], fg=c["toolbar_btn_fg"],
+                  command=ok).pack(side=tk.RIGHT, padx=(6, 0))
+        tk.Button(btns, text="取消", font=("Microsoft YaHei", 9),
+                  bg=c["toolbar_btn_bg"], fg=c["toolbar_btn_fg"],
+                  command=dialog.destroy).pack(side=tk.RIGHT)
+        entry.bind("<Return>", lambda e: ok())
+        entry.bind("<Escape>", lambda e: dialog.destroy())
+        dialog.wait_window()
+        return result[0]
+
+    def _add_current_file_tag(self, prefix):
+        """为当前文件添加标签"""
+        if not self._current_note_path:
+            self.status_left.configure(text="   请先打开一篇笔记")
+            return
+        tag = self._ask_single_line("添加标签", "输入新标签：")
+        if not tag:
+            return
+        tag = tag.replace(",", " ").strip()
+        if not tag:
+            return
+        from file_handler import (parse_front_matter_tags, set_note_tags,
+                                  build_tag_index, DATA_DIR)
+        filepath = os.path.join(DATA_DIR, f"{self._current_note_path}.md")
+        cur = parse_front_matter_tags(filepath)
+        if tag in cur:
+            self.status_left.configure(text=f"   标签「{tag}」已存在")
+            return
+        self._apply_tag_change(self._current_note_path, cur + [tag])
+
+    def _remove_selected_file_tag(self, prefix):
+        """删除当前文件被选中的标签"""
+        if not self._current_note_path:
+            self.status_left.configure(text="   请先打开一篇笔记")
+            return
+        lb = getattr(self, f"{prefix}tags_listbox", None)
+        if not lb:
+            return
+        sel = lb.curselection()
+        if not sel:
+            self.status_left.configure(
+                text="   请先在标签列表选中要删除的标签")
+            return
+        tag_text = lb.get(sel[0]).strip()
+        if tag_text in ("未打开文件", "无标签"):
+            return
+        from file_handler import (parse_front_matter_tags, DATA_DIR)
+        filepath = os.path.join(DATA_DIR, f"{self._current_note_path}.md")
+        cur = parse_front_matter_tags(filepath)
+        if tag_text not in cur:
+            self.status_left.configure(text=f"   标签「{tag_text}」不在文件中")
+            return
+        new = [t for t in cur if t != tag_text]
+        self._apply_tag_change(self._current_note_path, new)
+
+    def _apply_tag_change(self, rel_path, tags):
+        """写回标签 → 重建索引 → 刷新两处列表与标签树"""
+        from file_handler import set_note_tags, build_tag_index
+        new_tags = set_note_tags(rel_path, tags)
+        if new_tags is None:
+            self.status_left.configure(text="   写入标签失败")
+            return
+        build_tag_index()
+        self._refresh_file_tags()
+        self._refresh_tags()
+        self._snapshot_files()  # 抑制轮询自触发
+        summary = ", ".join(new_tags) if new_tags else "(无标签)"
+        self.status_left.configure(text=f"   标签已更新：{summary}")
 
     def _render_backlinks(self, rel_path):
         """在内容底部使用 Text tag 渲染百科风格反向链接框"""
@@ -1105,8 +1249,8 @@ class IndeXarApp:
         self._close_file_btn.configure(fg="#888")
 
         # 右侧：搜索 + 主题（先 pack RIGHT 确保不被推出）
-        header_right = tk.Frame(self.content_header)
-        header_right.pack(side=tk.RIGHT, padx=(0, 10))
+        self._header_right = tk.Frame(self.content_header)
+        self._header_right.pack(side=tk.RIGHT, padx=(0, 10))
 
         # 分隔线（紧贴搜索区左侧）
         self._header_sep = tk.Label(
@@ -1122,7 +1266,7 @@ class IndeXarApp:
             self._refresh_file_tree() if not self.search_var.get().strip() and self.current_panel == "files" else None
         ))
         self.search_entry = tk.Entry(
-            header_right,
+            self._header_right,
             textvariable=self.search_var,
             font=("Microsoft YaHei", 10),
             relief=tk.FLAT, bd=0,
@@ -1133,7 +1277,7 @@ class IndeXarApp:
         self.search_entry.bind("<Return>", lambda e: self._do_search())
 
         self.search_btn = tk.Button(
-            header_right, text="搜索",
+            self._header_right, text="搜索",
             font=("Microsoft YaHei", 9),
             relief=tk.RIDGE, bd=1, highlightthickness=0,
             padx=8, pady=1, cursor="hand2",
@@ -1143,16 +1287,16 @@ class IndeXarApp:
 
         # 外部编辑器按钮
         self.edit_btn = tk.Button(
-            header_right, text="编辑",
+            self._header_right, text="编辑",
             font=("Microsoft YaHei", 9),
             relief=tk.RIDGE, bd=1, highlightthickness=0,
             padx=6, pady=1, cursor="hand2",
-            command=self._open_in_editor,
+            command=self._open_current_in_editor,
         )
         self.edit_btn.pack(side=tk.LEFT, padx=(0, 8))
 
         # 主题切换
-        self.theme_frame = tk.Frame(header_right, cursor="hand2")
+        self.theme_frame = tk.Frame(self._header_right, cursor="hand2")
         self.theme_frame.pack(side=tk.LEFT)
 
         self._theme_sun_img = icon_renderer.sun_icon(self.colors["toolbar_fg"])
@@ -1720,6 +1864,7 @@ class IndeXarApp:
         # ── 标题栏 ──
         self.titlebar.configure(bg=c["toolbar_bg"])
         self.title_icon.configure(bg=c["toolbar_bg"])
+        self._update_title_logo()
         for lbl in self._menu_labels:
             lbl.configure(bg=c["toolbar_bg"], fg=c["toolbar_fg"])
             lbl._nb_normal_bg = c["toolbar_bg"]
@@ -1729,8 +1874,7 @@ class IndeXarApp:
                           activebackground=c["toolbar_btn_hover"])
 
         # ── 内容头部（搜索 + 主题） ──
-        header_right = self.content_header.winfo_children()[1]  # 右侧 Frame
-        header_right.configure(bg=c["content_header_bg"])
+        self._header_right.configure(bg=c["content_header_bg"])
         self.search_entry.configure(
             bg=c["search_bg"], fg=c["search_fg"],
             highlightbackground=c["search_border"],
@@ -1887,6 +2031,15 @@ class IndeXarApp:
                 sep.configure(bg=c["sidebar_bg"])
             if ctr:
                 ctr.configure(bg=c["sidebar_bg"])
+            tb = getattr(self, f"{prefix}tags_toolbar", None)
+            if tb:
+                tb.configure(bg=c["sidebar_bg"])
+                for child in tb.winfo_children():
+                    try:
+                        child.configure(bg=c["sidebar_bg"],
+                                        fg=c["sidebar_fg"])
+                    except tk.TclError:
+                        pass
 
         # ── 内容区 ──
         self.content_body.configure(bg=c["app_bg"], highlightbackground=c["app_bg"])
@@ -1931,7 +2084,12 @@ class IndeXarApp:
     # 面板切换
     # ══════════════════════════════════
 
-    def _show_files(self):
+    def _show_files(self, toggle=True):
+        # 点击当前激活的文件图标 → 收起/展开侧栏（VSCode 风格）
+        if (toggle and self.current_panel == "files"
+                and self._sidebar_width > 0):
+            self._toggle_sidebar()
+            return
         self.current_panel = "files"
         self.tag_frame.grid_remove()
         self.file_tree_frame.grid(row=0, column=0, sticky="nsew")
@@ -1941,7 +2099,12 @@ class IndeXarApp:
         self._apply_file_tags_visibility()
         self._refresh_file_tags()
 
-    def _show_tags(self):
+    def _show_tags(self, toggle=True):
+        # 点击当前激活的标签图标 → 收起/展开侧栏（VSCode 风格）
+        if (toggle and self.current_panel == "tags"
+                and self._sidebar_width > 0):
+            self._toggle_sidebar()
+            return
         self.current_panel = "tags"
         self.file_tree_frame.grid_remove()
         self.tag_frame.grid(row=0, column=0, sticky="nsew")
@@ -2011,6 +2174,7 @@ class IndeXarApp:
             if rel_path:
                 dialog.destroy()
                 self._refresh_file_tree()
+                self._snapshot_files()  # 抑制轮询自触发
                 self._display_note(rel_path)
 
         tk.Button(btn_frame, text="取消",
@@ -2557,10 +2721,12 @@ class IndeXarApp:
 
         if len(tag_iids) == 0:
             self.tag_intersection_label.configure(text="")
+            self._clear_tag_intersection()
             return
 
         if len(tag_iids) == 1:
             self.tag_intersection_label.configure(text="")
+            self._clear_tag_intersection()
         else:
             self._update_tag_intersection(tag_iids)
 
@@ -2593,8 +2759,18 @@ class IndeXarApp:
             except Exception:
                 pass
 
+    def _clear_tag_intersection(self):
+        """移除树中的交集分组节点"""
+        try:
+            if self.tag_tree.exists("__intersection__"):
+                self.tag_tree.delete("__intersection__")
+        except tk.TclError:
+            pass
+
     def _update_tag_intersection(self, tag_iids):
-        """计算并显示多选标签的文件交集"""
+        """计算多选标签的文件交集，并在树顶部展示交集文件列表"""
+        self._clear_tag_intersection()
+
         tag_index = get_tag_index()
         if not tag_index:
             self.tag_intersection_label.configure(text="")
@@ -2617,14 +2793,27 @@ class IndeXarApp:
             intersection = intersection & fs
 
         count = len(intersection)
-        tag_str = " ∩ ".join(tag_names)
+        tag_str = " ∩ ".join(sorted(tag_names))
+        if count == 0:
+            self.tag_intersection_label.configure(
+                text=f"  {tag_str} → 没有共同文件")
+            return
         self.tag_intersection_label.configure(
             text=f"  {tag_str} → {count} 个文件"
         )
 
-        # 刷新文件树为交集结果
-        if self.current_panel == "tags" and count > 0:
-            pass  # 交集信息已在上方显示，下方 Treeview 保持原样
+        # 在标签树顶部插入交集分组，双击文件可打开
+        inter_iid = self.tag_tree.insert(
+            "", "end", iid="__intersection__", open=True,
+            text=f"  {tag_str} ({count})")
+        self.tag_tree.item(inter_iid, tags=("tag_",))
+        for idx, fpath in enumerate(sorted(intersection)):
+            name = fpath.split("/")[-1]
+            fid = f"__intf_{idx}"
+            self.tag_tree.insert(inter_iid, "end", iid=fid,
+                                 text=f"  {name}", values=(fpath,))
+            self.tag_tree.item(fid, tags=("file_node",))
+        self.tag_tree.see(inter_iid)
 
     def _get_selected_tag_names(self):
         """返回当前选中的标签名列表"""
@@ -2684,28 +2873,48 @@ class IndeXarApp:
                          font_size=self._font_size)
 
     def _on_content_click(self, event):
-        """内容区点击——检测是否点在 wikilink 上"""
+        """内容区点击——内部链接直接跳转；外部链接需 Ctrl+点击"""
         try:
             pos = self.content_text.index(f"@{event.x},{event.y}")
+            ctrl_down = bool(event.state & 0x4)
             for tag in self.content_text.tag_names(pos):
                 if tag.startswith("wikilink_"):
                     self._navigate_to_link(tag[9:])
-                    break
+                    return
+                if tag.startswith("extlink_") and ctrl_down:
+                    url = getattr(self.content_text,
+                                  "_extlink_map", {}).get(tag)
+                    if url:
+                        import webbrowser
+                        webbrowser.open(url)
+                    return
         except Exception:
             pass
+
+    def _set_extlink_hint(self, url):
+        """进入外部链接时在状态栏显示操作提示"""
+        if not getattr(self, '_hint_saved_status', False):
+            self._hint_saved_status = True
+            self._hint_prev_text = self.status_left.cget("text")
+        self.status_left.configure(text=f"   Ctrl+点击 打开：{url}")
+
+    def _clear_extlink_hint(self):
+        """离开外部链接时恢复状态栏"""
+        if getattr(self, '_hint_saved_status', False):
+            self._hint_saved_status = False
+            self.status_left.configure(text=self._hint_prev_text)
 
     def _on_content_motion(self, event):
         """内容区鼠标移动——链接上手型光标 + 高亮（仅当前 tag）"""
         try:
             pos = self.content_text.index(f"@{event.x},{event.y}")
             tags = self.content_text.tag_names(pos)
-            # 找到鼠标所在位置的具体链接 tag
-            link_tags = [t for t in tags if t.startswith("wikilink_")]
-            has_link = bool(link_tags)
+            link_tags = [t for t in tags
+                         if t.startswith(("wikilink_", "extlink_"))]
 
             hover_bg = "#d6e4f0" if self.theme_mode == "light" else "#2a4a6b"
 
-            # 离开上一个链接 → 还原其背景
+            # 离开上一个链接 → 还原其背景与状态栏
             prev = getattr(self, '_hovered_tag', None)
             if prev and prev != (link_tags[0] if link_tags else None):
                 try:
@@ -2713,6 +2922,7 @@ class IndeXarApp:
                 except Exception:
                     pass
                 self._hovered_tag = None
+                self._clear_extlink_hint()
 
             # 进入新链接
             if link_tags:
@@ -2722,9 +2932,18 @@ class IndeXarApp:
                     self.content_text.config(cursor="hand2")
                 self.content_text.tag_configure(tag, background=hover_bg)
                 self._hovered_tag = tag
-            elif getattr(self, '_link_hover', False):
-                self._link_hover = False
-                self.content_text.config(cursor="")
+                if tag.startswith("extlink_"):
+                    url = getattr(self.content_text,
+                                  "_extlink_map", {}).get(tag)
+                    if url:
+                        self._set_extlink_hint(url)
+                    else:
+                        self._clear_extlink_hint()
+            else:
+                if getattr(self, '_link_hover', False):
+                    self._link_hover = False
+                    self.content_text.config(cursor="")
+                self._clear_extlink_hint()
         except Exception:
             pass
 
@@ -3464,6 +3683,89 @@ class IndeXarApp:
         self.root.destroy()
 
     def run(self):
-        # 启动时构建标签及反向链接索引（后台，不阻塞 UI）
-        self.root.after(100, lambda: (build_tag_index(), build_backlink_index()))
+        # 启动：后台构建索引 → 随后开始文件轮询监听
+        self._file_snapshots = {}
+        self.root.after(100, self._start_background_watch)
         self.root.mainloop()
+
+    def _start_background_watch(self):
+        """启动时构建索引并建立 mtime 快照，随后启动轮询"""
+        try:
+            build_tag_index()
+            build_backlink_index()
+        except Exception:
+            pass
+        self._snapshot_files()
+        self.root.after(1500, self._watch_data_dir)
+
+    def _snapshot_files(self):
+        """重建 mtime 快照（程序自身写文件后调用，抑制自触发）"""
+        try:
+            from file_handler import collect_mtimes
+            self._file_snapshots = collect_mtimes()
+        except Exception:
+            pass
+
+    def _watch_data_dir(self):
+        """轮询 data 目录，响应外部编辑/文件增删"""
+        try:
+            from file_handler import collect_mtimes
+            current = collect_mtimes()
+        except Exception:
+            self.root.after(1500, self._watch_data_dir)
+            return
+        old = getattr(self, "_file_snapshots", None) or {}
+        added = [p for p in current if p not in old]
+        removed = [p for p in old if p not in current]
+        modified = [p for p in current
+                    if p in old and current[p] != old[p]]
+        self._file_snapshots = current
+
+        if added or removed:
+            if self.current_panel == "files":
+                self._refresh_file_tree()
+            if self._current_note_path in removed:
+                self._close_file()
+        if added or modified:
+            self._rebuild_indexes()
+            if (self._current_note_path and
+                    self._current_note_path in (added + modified)):
+                self._rerender_current_note()
+        self.root.after(1500, self._watch_data_dir)
+
+    def _rebuild_indexes(self):
+        """节流重建标签与反向链接索引并刷新标签区"""
+        import time
+        now = time.time()
+        if now - getattr(self, "_last_index_build", 0.0) < 0.8:
+            return
+        self._last_index_build = now
+        try:
+            build_tag_index()
+            build_backlink_index()
+        except Exception:
+            pass
+        self._refresh_tags()
+        self._refresh_file_tags()
+
+    def _rerender_current_note(self):
+        """当前浏览的笔记被外部修改 → 重渲染并保持滚动位置"""
+        rel = self._current_note_path
+        if not rel:
+            return
+        content = read_note(rel)
+        if content is None:
+            return
+        try:
+            top = self.content_text.yview()[0]
+        except Exception:
+            top = 0.0
+        self._render_markdown(content)
+        self._render_backlinks(rel)
+        self.content_text.configure(state=tk.DISABLED)
+        self._refresh_file_tags()
+        try:
+            self.root.update_idletasks()
+            self.content_text.yview_moveto(top)
+        except Exception:
+            pass

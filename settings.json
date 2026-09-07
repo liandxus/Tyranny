@@ -1,9 +1,9 @@
 {
   "font_size": 11,
-  "theme_mode": "light",
+  "theme_mode": "dark",
   "follow_system_theme": false,
-  "sidebar_width": 285,
+  "sidebar_width": 240,
   "file_tags_collapsed": false,
-  "file_tags_height": 215,
-  "editor_path": "C:\\WINDOWS\\System32\\notepad.exe"
+  "file_tags_height": 501,
+  "editor_path": "notepad.exe"
 }
