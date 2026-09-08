@@ -731,12 +731,16 @@ class IndeXarApp:
             filepath = os.path.join(DATA_DIR, f"{iid}.md")
             if not os.path.exists(filepath):
                 return
+        import shutil
+        editor = self._editor_path or "notepad.exe"
+        # 路径失效（软件被卸载或迁移）时回退系统记事本
+        if not (os.path.isfile(editor) or shutil.which(editor)):
+            editor = "notepad.exe"
         try:
-            subprocess.Popen([self._editor_path, filepath],
-                             shell=True)
+            # 不使用 shell=True：路径含空格时会被二次解析，导致启动失败
+            subprocess.Popen([editor, filepath])
         except Exception:
-            # 回退到默认记事本
-            subprocess.Popen(["notepad.exe", filepath], shell=True)
+            subprocess.Popen(["notepad.exe", filepath])
 
     def _build_tag_panel(self):
         """标签面板：可折叠的两个区块 —— 所有标签 + 当前文件标签"""
@@ -3302,21 +3306,98 @@ class IndeXarApp:
                          ).pack(fill=tk.X, pady=(0, 8))
                 names = list(editors.keys())
                 ev = tk.StringVar()
-                cur = "记事本"
-                for n, p in editors.items():
-                    if p == self._editor_path:
-                        cur = n
-                        break
-                ev.set(cur if cur in names else names[0])
+
+                # 裸命令名（如 notepad.exe）补全为已检测项的绝对路径
+                if self._editor_path:
+                    base = os.path.basename(self._editor_path).lower()
+                    for n, p in editors.items():
+                        if p and os.path.basename(p).lower() == base:
+                            self._editor_path = p
+                            break
+
+                # 当前设置：命中已检测项则显示其名称，否则作为自定义项回显
+                cur = None
+                if self._editor_path:
+                    for n, p in editors.items():
+                        if p and os.path.normcase(p) == os.path.normcase(
+                                self._editor_path):
+                            cur = n
+                            break
+                if cur is None and self._editor_path:
+                    cur = f"自定义：{os.path.basename(self._editor_path)}"
+                    editors[cur] = self._editor_path
+                    names.insert(0, cur)
+                ev.set(cur if cur else (names[0] if names else ""))
+
                 cb = ttk.Combobox(ct, textvariable=ev, values=names,
                                   state="readonly", font=lf, width=20)
                 cb.pack(anchor=tk.W)
+
+                # ── 当前路径与有效性提示 ──
+                path_lbl = tk.Label(ct, text="", anchor=tk.W,
+                                    font=("Microsoft YaHei", 8),
+                                    bg=c["sidebar_bg"], fg=c["sidebar_fg"],
+                                    wraplength=420, justify=tk.LEFT)
+                path_lbl.pack(fill=tk.X, pady=(10, 0))
+
+                def _editor_ok(p):
+                    import shutil
+                    return bool(p) and (os.path.isfile(p)
+                                        or shutil.which(p) is not None)
+
+                def _refresh_path_label():
+                    p = self._editor_path or ""
+                    if not p:
+                        path_lbl.configure(text="(未指定，默认使用记事本)",
+                                           fg=c["sidebar_fg"])
+                    elif _editor_ok(p):
+                        path_lbl.configure(text=p, fg=c["sidebar_fg"])
+                    else:
+                        path_lbl.configure(
+                            text=f"{p}\n（路径无效，打开时将回退记事本）",
+                            fg="#e81123")
+
+                def _browse():
+                    """手动指定任意 exe（覆盖便携版、绿色版等检测不到的程序）"""
+                    from tkinter import filedialog
+                    init = (os.path.dirname(self._editor_path)
+                            if self._editor_path
+                            and os.path.isfile(self._editor_path)
+                            else os.environ.get("ProgramFiles", "C:\\"))
+                    fp = filedialog.askopenfilename(
+                        parent=ct.winfo_toplevel(),
+                        title="选择编辑器程序",
+                        initialdir=init,
+                        filetypes=[("可执行程序", "*.exe"),
+                                   ("所有文件", "*.*")])
+                    if not fp:
+                        return
+                    self._editor_path = fp
+                    custom = f"自定义：{os.path.basename(fp)}"
+                    editors[custom] = fp
+                    if custom not in names:
+                        names.append(custom)
+                        cb.configure(values=names)
+                    ev.set(custom)
+                    _refresh_path_label()
+                    self._save_settings()
+
                 cb.bind("<<ComboboxSelected>>",
                         lambda e: (
                             setattr(self, '_editor_path',
                                     editors.get(ev.get(), self._editor_path)),
+                            _refresh_path_label(),
                             self._save_settings(),
                         ))
+
+                bb = tk.Button(ct, text="选择编辑器...",
+                               font=("Microsoft YaHei", 9),
+                               width=14, relief=tk.RIDGE, bd=1, cursor="hand2",
+                               command=_browse)
+                bb.configure(bg=c["toolbar_btn_bg"], fg=c["toolbar_btn_fg"],
+                             activebackground=c["toolbar_btn_hover"])
+                bb.pack(anchor=tk.W, pady=(8, 0))
+                _refresh_path_label()
 
         def _delta_size(sv, d):
             try:
