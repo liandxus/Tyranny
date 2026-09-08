@@ -355,8 +355,11 @@ def build_tag_index():
     for item in _walk(DATA_DIR):
         filepath = os.path.join(DATA_DIR, f"{item['path']}.md")
         tags = parse_front_matter_tags(filepath)
-        for tag in tags:
-            tag_map.setdefault(tag, []).append(item["path"])
+        # 同一文件内重复标签只记一次，同一路径不重复收录
+        for tag in dict.fromkeys(tags):
+            paths = tag_map.setdefault(tag, [])
+            if item["path"] not in paths:
+                paths.append(item["path"])
 
     # 按文件数量降序排列
     sorted_map = dict(
@@ -407,11 +410,17 @@ def get_tag_index(force_rebuild=False):
 # ══════════════════════════════════
 
 def parse_wikilinks(content):
-    """从笔记正文中提取 [[目标]] 链接的目标名列表"""
+    """从笔记正文中提取 [[目标]] 链接的目标名列表
+
+    同一目标在单篇笔记中被重复引用时只记一次（保持首次出现的顺序），
+    这样反向链接索引里每个来源笔记只会出现一条。
+    """
     links = []
+    seen = set()
     for m in re.finditer(r'\[\[([^\[\]|]+)(?:\|([^\[\]]+))?\]\]', content):
         target = m.group(1).strip().replace(".md", "")
-        if target:
+        if target and target not in seen:
+            seen.add(target)
             links.append(target)
     return links
 
@@ -435,7 +444,10 @@ def build_backlink_index():
             if end != -1:
                 content = content[end + 3:]
         for target in parse_wikilinks(content):
-            backlinks.setdefault(target, []).append(item["path"])
+            refs = backlinks.setdefault(target, [])
+            # 同一引用者只记录一次（防御路径重复/大小写差异）
+            if item["path"] not in refs:
+                refs.append(item["path"])
 
     # 合并写入 index.json，不覆盖 tags
     merged = {}
@@ -461,6 +473,8 @@ def get_backlinks(note_name):
     try:
         with open(INDEX_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return data.get("backlinks", {}).get(note_name, [])
+        refs = data.get("backlinks", {}).get(note_name, [])
+        # 防御性去重：兼容历史 index.json 中残留的重复条目
+        return list(dict.fromkeys(refs))
     except Exception:
         return []
