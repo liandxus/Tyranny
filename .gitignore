@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 .DS_Store
 Thumbs.db
+
+# 本地个人配置（主题、窗口尺寸、编辑器路径等，因人而异）
+settings.json
