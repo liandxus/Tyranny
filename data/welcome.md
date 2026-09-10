@@ -3,6 +3,7 @@ created: 2026-05-06
 tags:
 - 入门
 - 档案
+- 测试1
 title: 欢迎使用 IndeXar
 ---
 

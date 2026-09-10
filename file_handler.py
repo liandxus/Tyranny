@@ -323,27 +323,78 @@ def parse_front_matter_tags(filepath):
     return [str(t) for t in tags if t]
 
 
+def _yaml_tag(value):
+    """把标签序列化为合法的 YAML 标量（含特殊字符时加双引号）"""
+    s = str(value)
+    if s and s == s.strip() and not re.search(r'[,\[\]{}:#&*!|>%@`"\'\n]', s):
+        return s
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def set_note_tags(rel_path, tags):
     """
-    设置笔记 front matter 的 tags 字段（保留其他元数据与正文）。
-    返回写入后的标签列表；文件不存在或解析失败返回 None。
+    设置笔记 front matter 的 tags 字段。
+
+    只就地替换 tags 字段本身，front matter 中其它字段的顺序与写法保持不变
+    （不整体重新序列化，避免改动用户手写的 YAML），并保证文件以换行结尾。
+    返回写入后的标签列表；文件不存在或写入失败返回 None。
     """
     filepath = os.path.join(DATA_DIR, f"{rel_path}.md")
     if not os.path.exists(filepath):
         return None
+
+    clean = [str(t).strip() for t in tags if str(t).strip()]
+    # 去重但保持顺序
+    seen = set()
+    clean = [t for t in clean if not (t in seen or seen.add(t))]
+    tag_line = "tags: [" + ", ".join(_yaml_tag(t) for t in clean) + "]"
+
     try:
         with open(filepath, "r", encoding="utf-8") as f:
-            post = frontmatter.load(f)
-        clean = [str(t).strip() for t in tags if str(t).strip()]
-        # 去重但保持顺序
-        seen = set()
-        clean = [t for t in clean if not (t in seen or seen.add(t))]
-        post.metadata["tags"] = clean
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(frontmatter.dumps(post))
-        return clean
-    except Exception:
+            text = f.read()
+    except (IOError, OSError):
         return None
+
+    lines = text.split("\n")
+
+    if not lines or lines[0].strip() != "---":
+        # 没有 front matter：在文件开头补一个
+        new_text = f"---\n{tag_line}\n---\n\n{text.lstrip(chr(10))}"
+    else:
+        # 定位 front matter 结束行
+        end = None
+        for i in range(1, len(lines)):
+            if lines[i].strip() == "---":
+                end = i
+                break
+        if end is None:
+            return None
+
+        # 在 front matter 内查找 tags 字段（兼容 `tags: [...]` 与块式 `- x`）
+        start = stop = None
+        for i in range(1, end):
+            if lines[i].strip().startswith("tags:"):
+                start = i
+                stop = i + 1
+                while stop < end and lines[stop].lstrip().startswith("- "):
+                    stop += 1
+                break
+
+        if start is None:
+            new_lines = lines[:end] + [tag_line] + lines[end:]
+        else:
+            new_lines = lines[:start] + [tag_line] + lines[stop:]
+        new_text = "\n".join(new_lines)
+
+    if not new_text.endswith("\n"):
+        new_text += "\n"
+
+    try:
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(new_text)
+    except (IOError, OSError):
+        return None
+    return clean
 
 
 def build_tag_index():

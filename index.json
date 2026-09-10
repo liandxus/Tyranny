@@ -47,6 +47,11 @@
       "test3",
       "test4"
     ],
+    "测试1": [
+      "test1",
+      "test3",
+      "welcome"
+    ],
     "入门": [
       "test",
       "welcome"
@@ -56,6 +61,9 @@
     ],
     "档案": [
       "welcome"
+    ],
+    "测试2": [
+      "test"
     ],
     "进阶": [
       "test3"
