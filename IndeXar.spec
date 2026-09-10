@@ -11,9 +11,17 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # numpy/psutil 等并非本应用依赖，是 Anaconda 环境下依赖分析误收集
+    excludes=['numpy', 'psutil'],
     noarchive=False,
 )
+
+# 过滤误收集的二进制：mkl 系列 DLL 占 350MB+，应用完全用不到
+a.binaries = [b for b in a.binaries
+              if 'mkl' not in b[0].lower()
+              and 'numpy' not in b[0].lower()
+              and 'psutil' not in b[0].lower()
+              and 'tbb12' not in b[0].lower()]
 pyz = PYZ(a.pure)
 
 exe = EXE(
