@@ -219,6 +219,9 @@ class IndeXarApp:
                 ("在资源管理器中打开", self._open_in_explorer),
             ]),
             ("视图", self._get_view_menu_items),
+            ("帮助", [
+                ("使用帮助", lambda: self._open_help()),
+            ]),
         ]
         for name, items in self._menu_defs:
             lbl = tk.Label(bar, text=name,
@@ -3191,6 +3194,216 @@ class IndeXarApp:
         # 如果有当前打开的文件，重新渲染
         if hasattr(self, '_current_note_path') and self._current_note_path:
             self._display_note(self._current_note_path)
+
+    def _open_help(self, category=None):
+        """打开帮助面板（左分类 + 右内容，可拖动分隔）"""
+        # 两级结构：{分类: [(小节标题, [(类型, 文本), ...]), ...]}
+        sections = {
+            "操作指南": [
+                ("打开与浏览", [
+                    ("p", "· 单击左侧文件树中的文件名，即可在右侧打开笔记。"),
+                    ("p", "· 内容区右上角 ☀ / 🌙 图标切换亮色 / 暗色主题。"),
+                    ("p", "· 拖拽面板之间的分隔条可调整侧栏宽度。"),
+                ]),
+                ("搜索", [
+                    ("p", "· 在顶部搜索框输入关键词后回车；清空搜索框会自动返回文件树。"),
+                    ("p", "· 结果按「文件名匹配 → 内容匹配」排序，文件名命中的排在前面。"),
+                    ("p", "· 结果列表中的上下文片段可点击，跳转到正文中对应位置。"),
+                    ("p", "· 检索为关键词遍历匹配，不支持模糊匹配与布尔查询。"),
+                ]),
+                ("标签与交集", [
+                    ("p", "· 单击标签展开其下的笔记列表，双击笔记名打开。"),
+                    ("p", "· Ctrl / Shift + 点击多个标签，可求同时含这些标签的笔记："),
+                    ("p", "  顶部显示「标签A ∩ 标签B → N 个文件」，双击列表项即可打开。"),
+                ]),
+                ("链接跳转", [
+                    ("p", "· 点击正文中的 [[笔记名]] 可跳转到对应笔记。"),
+                    ("p", "· Ctrl + 点击正文中的网址，用默认浏览器打开。"),
+                    ("p", "  注意：直接书写的裸网址不会被识别，需按「笔记格式」中的写法。"),
+                ]),
+                ("右键菜单", [
+                    ("p", "· 文件树右键：新建笔记 / 新建文件夹 / 重命名 / 删除 /"),
+                    ("p", "  在资源管理器中显示 / 用外部编辑器打开。"),
+                    ("p", "· 表格单元格右键：复制单元格内容。"),
+                ]),
+            ],
+            "笔记格式": [
+                ("YAML 元数据", [
+                    ("p", "写在 .md 文件开头，用 --- 包裹："),
+                    ("code", "---\ntitle: 笔记标题\n"
+                             "date: 2026-09-10\n"
+                             "tags: [标签1, 标签2]\n---"),
+                    ("p", "· tags 字段会被收集到左侧标签面板，用于聚合与交集筛选。"),
+                ]),
+                ("内部链接", [
+                    ("code", "[[笔记名]]\n[[笔记名|显示的文字]]"),
+                    ("p", "· 点击即可跳转到对应笔记。"),
+                    ("p", "· 被引用的笔记底部会自动显示「被以下笔记引用」列表。"),
+                ]),
+                ("外部链接", [
+                    ("code", "[显示文字](https://example.com)"),
+                    ("p", "· 必须写成上面的 Markdown 链接语法，Ctrl + 点击可用浏览器打开。"),
+                    ("p", "· 直接书写 https://example.com 这样的裸网址不会被识别为链接。"),
+                ]),
+                ("支持的 Markdown 语法", [
+                    ("p", "· 标题 # / ## / ###、粗体 **文字**、斜体 *文字*、删除线 ~~文字~~"),
+                    ("p", "· 无序列表 -、有序列表 1.、引用 >、分隔线 ---"),
+                    ("p", "· 行内代码 `code` 与围栏代码块 ```"),
+                    ("p", "· 表格以原生表格控件渲染（单元格不支持拖选与换行）"),
+                ]),
+            ],
+        }
+
+        c = self.colors
+        W, H = 640, 480
+        is_dark = self.theme_mode == "dark"
+        win_border = "#555555" if is_dark else "#777777"
+        bar_bg, bar_fg = c["nav_bg"], c["nav_fg"]
+        bar_btn_hover = "#e81123" if not is_dark else "#c03333"
+
+        dialog = tk.Toplevel(self.root)
+        dialog.overrideredirect(True)
+        dialog.configure(bg=c["sidebar_bg"], highlightthickness=1,
+                         highlightbackground=win_border)
+        dialog.minsize(420, 300)
+
+        # ── 标题栏 ──
+        bar = tk.Frame(dialog, height=28, bg=bar_bg)
+        bar.pack(fill=tk.X, side=tk.TOP)
+        bar.pack_propagate(False)
+        tk.Label(bar, text="  帮助", font=("Microsoft YaHei", 10),
+                 anchor=tk.W, bg=bar_bg, fg=bar_fg
+                 ).pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tk.Button(bar, text="✕", font=("Segoe UI", 9),
+                  relief=tk.FLAT, bd=0, padx=8, command=dialog.destroy,
+                  bg=bar_bg, fg=bar_fg,
+                  activebackground=bar_btn_hover, activeforeground="#ffffff"
+                  ).pack(side=tk.RIGHT, fill=tk.Y)
+
+        def _drag_start(e):
+            dialog._dx, dialog._dy = e.x_root, e.y_root
+
+        def _drag_move(e):
+            dialog.geometry(
+                f"+{dialog.winfo_x() + e.x_root - dialog._dx}"
+                f"+{dialog.winfo_y() + e.y_root - dialog._dy}")
+            dialog._dx, dialog._dy = e.x_root, e.y_root
+
+        for w in (bar, bar.winfo_children()[0]):
+            w.bind("<Button-1>", _drag_start)
+            w.bind("<B1-Motion>", _drag_move)
+
+        # ── 主体：PanedWindow 可分栏 ──
+        pane = ttk.PanedWindow(dialog, orient=tk.HORIZONTAL)
+        pane.pack(fill=tk.BOTH, expand=True)
+        st = ttk.Style()
+        st.configure("TPanedwindow", background=c["sidebar_bg"])
+        st.configure("sash.TPanedwindow", sashthickness=4,
+                     sashrelief=tk.FLAT,
+                     background="#999" if not is_dark else "#666")
+
+        left_bg = "#dddddd" if not is_dark else "#1e1e1e"
+        left = tk.Frame(pane, bg=left_bg, width=140)
+        right = tk.Frame(pane, bg=c["sidebar_bg"], padx=6, pady=10)
+        pane.add(left, weight=0)
+        pane.add(right, weight=1)
+
+        # ── 右侧只读文本区 ──
+        text = tk.Text(right, wrap=tk.WORD, bd=0, highlightthickness=0,
+                       bg=c["content_bg"], fg=c["content_fg"],
+                       font=("Microsoft YaHei", 10),
+                       spacing1=2, spacing3=4, padx=6, pady=8)
+        scroll = ttk.Scrollbar(right, orient=tk.VERTICAL, command=text.yview)
+        text.configure(yscrollcommand=scroll.set)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        code_bg = "#1e1e1e" if is_dark else "#f0f0f0"
+        code_fg = "#d4d4d4" if is_dark else "#333333"
+        text.tag_configure("h", font=("Microsoft YaHei", 11, "bold"),
+                           spacing1=12, foreground=c["content_fg"])
+        text.tag_configure("p", spacing1=2)
+        text.tag_configure("code", font=("Consolas", 9),
+                           background=code_bg, foreground=code_fg,
+                           spacing1=6, spacing3=6,
+                           lmargin1=10, lmargin2=10)
+
+        def _render(title, items):
+            text.configure(state=tk.NORMAL)
+            text.delete("1.0", "end")
+            text.insert("end", title + "\n", "h")
+            for kind, line in items:
+                text.insert("end", line + "\n", kind)
+            text.configure(state=tk.DISABLED)
+            text.yview_moveto(0)
+
+        # ── 左侧层级：分类（可折叠） → 小节 ──
+        sub_labels = []    # [(小节标题, 内容, Label)]
+        cat_rows = []      # [(分类名, 表头 Label, 小节容器 Frame)]
+        folded = set()     # 已折叠的分类
+
+        def _refresh_fold():
+            for cat, head, sub in cat_rows:
+                head.configure(
+                    text="  " + ("▸ " if cat in folded else "▾ ") + cat)
+                if cat in folded:
+                    sub.pack_forget()
+                else:
+                    sub.pack(fill=tk.X)
+
+        def _toggle(cat):
+            if cat in folded:
+                folded.discard(cat)
+            else:
+                folded.add(cat)
+            _refresh_fold()
+
+        def _select(title, items):
+            for t, _i, lbl in sub_labels:
+                lbl.configure(bg=c["toolbar_btn_hover"] if t == title
+                              else left_bg)
+            _render(title, items)
+
+        for cat, subs in sections.items():
+            holder = tk.Frame(left, bg=left_bg)
+            holder.pack(fill=tk.X)
+            head = tk.Label(holder, anchor=tk.W, cursor="hand2",
+                            font=("Microsoft YaHei", 10, "bold"),
+                            bg=left_bg, fg=c["sidebar_fg"], pady=6)
+            head.pack(fill=tk.X)
+            head.bind("<Button-1>", lambda e, cat=cat: _toggle(cat))
+            sub = tk.Frame(holder, bg=left_bg)
+            sub.pack(fill=tk.X)
+
+            for title, items in subs:
+                lbl = tk.Label(sub, text="      " + title, anchor=tk.W,
+                               font=("Microsoft YaHei", 9),
+                               bg=left_bg, fg=c["sidebar_fg"], pady=4,
+                               cursor="hand2")
+                lbl.pack(fill=tk.X)
+                lbl.bind("<Button-1>",
+                         lambda e, t=title, i=items: _select(t, i))
+                sub_labels.append((title, items, lbl))
+
+            cat_rows.append((cat, head, sub))
+
+        _refresh_fold()
+
+        # 初始定位：优先命中 category，否则第一个小节
+        if sub_labels:
+            pick = sub_labels[0]
+            if category:
+                for row in sub_labels:
+                    if row[0] == category:
+                        pick = row
+                        break
+            _select(pick[0], pick[1])
+
+        # 居中于主窗口
+        dialog.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - W) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - H) // 2
+        dialog.geometry(f"{W}x{H}+{max(x, 0)}+{max(y, 0)}")
 
     def _open_settings(self):
         """打开集成设置面板（左分类 + 右内容，可拖动分隔）"""
