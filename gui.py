@@ -27,6 +27,7 @@ from ui.content_view import ContentViewMixin
 from ui.dialogs import DialogsMixin
 from ui.file_tree import FileTreeMixin
 from ui.search import SearchMixin
+from ui.search_panel import SearchPanelMixin
 from ui.shell import ShellMixin
 from ui.tag_panel import TagPanelMixin
 from ui.theme import ThemeMixin
@@ -35,8 +36,8 @@ from ui.trash_panel import TrashPanelMixin
 
 
 class IndeXarApp(TitleBarMixin, FileTreeMixin, TagPanelMixin,
-                 ContentViewMixin, SearchMixin, DialogsMixin,
-                 ThemeMixin, ShellMixin, TrashPanelMixin):
+                 ContentViewMixin, SearchMixin, SearchPanelMixin,
+                 DialogsMixin, ThemeMixin, ShellMixin, TrashPanelMixin):
     """IndeXar 主应用（无边框+自定义标题栏）"""
 
     ICONS = {"light": {"sun": "☀️", "moon": "🌙"},
@@ -179,6 +180,7 @@ class IndeXarApp(TitleBarMixin, FileTreeMixin, TagPanelMixin,
         self._build_file_tree_panel()
         self._build_tag_panel()
         self._build_trash_panel()
+        self._build_search_panel()
 
         # ── 可拖动分隔条（col=2, sticky="ns", w=4）──
         self._grip = tk.Frame(self.body, width=4, cursor="sb_h_double_arrow")

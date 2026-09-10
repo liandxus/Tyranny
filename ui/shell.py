@@ -42,6 +42,18 @@ class ShellMixin:
         self.nav_tags_btn.pack(fill=tk.X, ipady=10, pady=(4, 0))
         self.nav_tags_btn.bind("<Button-1>", lambda e: self._show_tags())
 
+        # 搜索按钮（位于标签与回收站之间）
+        self._nav_search_img = icon_renderer.search_icon(
+            self.colors["nav_fg"]
+        )
+        self.nav_search_btn = tk.Label(
+            self.nav, image=self._nav_search_img,
+            bg=self.colors["nav_bg"],
+            cursor="hand2",
+        )
+        self.nav_search_btn.pack(fill=tk.X, ipady=10, pady=(4, 0))
+        self.nav_search_btn.bind("<Button-1>", lambda e: self._show_search())
+
         self._nav_trash_img = icon_renderer.trash_icon(
             self.colors["nav_fg"]
         )
@@ -57,6 +69,8 @@ class ShellMixin:
         _add_hover_bg(self.nav_files_btn,
                       self.colors["nav_bg"], self.colors["nav_hover_bg"])
         _add_hover_bg(self.nav_tags_btn,
+                      self.colors["nav_bg"], self.colors["nav_hover_bg"])
+        _add_hover_bg(self.nav_search_btn,
                       self.colors["nav_bg"], self.colors["nav_hover_bg"])
         _add_hover_bg(self.nav_trash_btn,
                       self.colors["nav_bg"], self.colors["nav_hover_bg"])
@@ -127,6 +141,7 @@ class ShellMixin:
         self.current_panel = "files"
         self.tag_frame.grid_remove()
         self.trash_frame.grid_remove()
+        self.search_frame.grid_remove()
         self.file_tree_frame.grid(row=0, column=0, sticky="nsew")
         self._restore_sidebar_if_collapsed()
         self._update_nav_icons()
@@ -143,12 +158,31 @@ class ShellMixin:
         self.current_panel = "tags"
         self.file_tree_frame.grid_remove()
         self.trash_frame.grid_remove()
+        self.search_frame.grid_remove()
         self.tag_frame.grid(row=0, column=0, sticky="nsew")
         self._restore_sidebar_if_collapsed()
         self._update_nav_icons()
         self._refresh_tags()
         self._apply_file_tags_visibility()
         self._refresh_file_tags()
+
+    def _show_search(self, toggle=True):
+        """切换到搜索面板，焦点落到输入框"""
+        if (toggle and self.current_panel == "search"
+                and self._sidebar_width > 0):
+            self._toggle_sidebar()
+            return
+        self.current_panel = "search"
+        self.file_tree_frame.grid_remove()
+        self.tag_frame.grid_remove()
+        self.trash_frame.grid_remove()
+        self.search_frame.grid(row=0, column=0, sticky="nsew")
+        self._restore_sidebar_if_collapsed()
+        self._update_nav_icons()
+        try:
+            self.panel_search_entry.focus_set()
+        except tk.TclError:
+            pass
 
     def _show_trash(self, toggle=True):
         """切换到回收站面板"""
@@ -159,6 +193,7 @@ class ShellMixin:
         self.current_panel = "trash"
         self.file_tree_frame.grid_remove()
         self.tag_frame.grid_remove()
+        self.search_frame.grid_remove()
         self.trash_frame.grid(row=0, column=0, sticky="nsew")
         self._restore_sidebar_if_collapsed()
         self._update_nav_icons()
@@ -176,9 +211,13 @@ class ShellMixin:
 
 
     def _update_nav_icons(self):
-        """根据当前主题色和活动面板刷新图标"""
-        active = self.colors["nav_active_fg"]
+        """根据当前主题色和活动面板刷新图标；侧栏收起时全部回到未激活态"""
         inactive = self.colors["nav_fg"]
+        # 侧栏收起时面板不可见，活动栏不应保留任何高亮
+        if self._sidebar_width <= 0:
+            active = inactive
+        else:
+            active = self.colors["nav_active_fg"]
         self._nav_files_img = icon_renderer.folder_icon(
             active if self.current_panel == "files" else inactive
         )
@@ -187,6 +226,10 @@ class ShellMixin:
             active if self.current_panel == "tags" else inactive
         )
         self.nav_tags_btn.configure(image=self._nav_tags_img)
+        self._nav_search_img = icon_renderer.search_icon(
+            active if self.current_panel == "search" else inactive
+        )
+        self.nav_search_btn.configure(image=self._nav_search_img)
         self._nav_trash_img = icon_renderer.trash_icon(
             active if self.current_panel == "trash" else inactive
         )
@@ -279,4 +322,6 @@ class ShellMixin:
             self.side_frame.grid(row=0, column=1, sticky="ns")
             self.side_frame.configure(width=self._sidebar_width)
             self._grip.grid(row=0, column=2, sticky="ns")
+        # 侧栏显隐变化后刷新活动栏高亮（收起时全部回到未激活态）
+        self._update_nav_icons()
         self._save_settings()

@@ -18,10 +18,10 @@ class VSCodeTheme:
         "search_fg": "#333333",
         "search_border": "#cecece",
 
-        "nav_bg": "#2c2c2c",
-        "nav_fg": "#858585",
-        "nav_active_fg": "#ffffff",
-        "nav_hover_bg": "#484848",
+        "nav_bg": "#d8d8d8",
+        "nav_fg": "#6a6a6a",
+        "nav_active_fg": "#1a1a1a",
+        "nav_hover_bg": "#cccccc",
 
         "sidebar_bg": "#e8e8e8",
         "sidebar_fg": "#333333",

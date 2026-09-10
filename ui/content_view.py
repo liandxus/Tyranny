@@ -215,8 +215,10 @@ class ContentViewMixin:
         self.search_clear_lbl.bind("<Leave>", lambda e: (
             self.search_clear_lbl.configure(fg=self.colors["toolbar_fg"])))
 
-        self.search_var = tk.StringVar()
-        # 内容变化时：控制清空按钮显隐；清空则恢复文件树
+        # search_var 由头部快捷搜索框与搜索面板共享，此处若已存在则复用
+        if not isinstance(getattr(self, "search_var", None), tk.StringVar):
+            self.search_var = tk.StringVar()
+        # 内容变化时：控制清空按钮显隐；清空则清空搜索结果
         self.search_var.trace_add("write",
                                   lambda *a: self._on_search_var_changed())
         self.search_entry = tk.Entry(

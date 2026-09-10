@@ -59,22 +59,27 @@ class SearchMixin:
 
 
     def _on_search_var_changed(self):
-        """搜索框内容变化：有输入才显示清空按钮；清空则恢复文件树"""
+        """搜索框内容变化：有输入才显示清空按钮；清空则清空搜索结果"""
         try:
             if self.search_var.get().strip():
                 self.search_clear_lbl.pack(side=tk.RIGHT, padx=(0, 2),
                                            after=self.search_btn)
             else:
                 self.search_clear_lbl.pack_forget()
-                if self.current_panel == "files":
-                    self._refresh_file_tree()
+                self._refresh_search_results()
         except Exception:
             pass
 
     def _clear_search(self):
-        """清空搜索框并恢复文件树，焦点回到输入框"""
+        """清空搜索框与结果，焦点回到输入框"""
         self.search_var.set("")
-        self.search_entry.focus_set()
+        try:
+            if self.current_panel == "search":
+                self.panel_search_entry.focus_set()
+            else:
+                self.search_entry.focus_set()
+        except tk.TclError:
+            pass
 
     def _do_search(self):
         keyword = self.search_var.get().strip()
@@ -82,10 +87,10 @@ class SearchMixin:
         if not keyword:
             return
 
-        if self.current_panel != "files":
-            self._show_files()
-        for item in self.tree.get_children():
-            self.tree.delete(item)
+        if self.current_panel != "search":
+            self._show_search()
+        for item in self.search_tree.get_children():
+            self.search_tree.delete(item)
 
         cur = self._current_note_path
         # 全库遍历匹配由 search_engine 负责
@@ -97,25 +102,25 @@ class SearchMixin:
 
         total = len(name_matches) + len(content_matches)
         if total == 0 and cur_hit_count == 0:
-            self.tree.insert("", "end", text=f"  未找到 \"{keyword}\"")
+            self.search_tree.insert("", "end", text=f"  未找到 \"{keyword}\"")
             self._set_content(f"未找到包含 \"{keyword}\" 的笔记。")
             self.status_left.configure(text="   未找到结果")
             return
 
         total += cur_hit_count
-        self.tree.insert("", "end",
+        self.search_tree.insert("", "end",
             text=f"  搜索结果 \"{keyword}\" ({total})",
             values=("__header__",), open=True)
 
         # ① 当前文件
         if cur_hit_count > 0 and cur:
-            piid = self.tree.insert("", "end",
+            piid = self.search_tree.insert("", "end",
                 text=f"  当前文件 ({cur_hit_count})", open=True,
                 values=("__header__",))
             # 提取每个匹配位的小段摘要
             snippets = self._extract_text_snippets(keyword_lower)
             for i, snip_text in enumerate(snippets[:cur_hit_count]):
-                self.tree.insert(piid, "end",
+                self.search_tree.insert(piid, "end",
                     text=f"[{i+1}] {snip_text}",
                     values=(f"__snippet_{i}",))
             if cur in name_matches:
@@ -125,20 +130,20 @@ class SearchMixin:
 
         # ② 文件名匹配
         if name_matches:
-            piid = self.tree.insert("", "end",
+            piid = self.search_tree.insert("", "end",
                 text=f"  文件名匹配 ({len(name_matches)})", open=True,
                 values=("__header__",))
             for p in name_matches:
-                self.tree.insert(piid, "end", text=p.split("/")[-1],
+                self.search_tree.insert(piid, "end", text=p.split("/")[-1],
                     values=(p, False))
 
         # ③ 内容匹配
         if content_matches:
-            piid = self.tree.insert("", "end",
+            piid = self.search_tree.insert("", "end",
                 text=f"  内容匹配 ({len(content_matches)})", open=True,
                 values=("__header__",))
             for p in content_matches:
-                self.tree.insert(piid, "end", text=p.split("/")[-1],
+                self.search_tree.insert(piid, "end", text=p.split("/")[-1],
                     values=(p, False))
 
         self._cur_keyword = keyword_lower

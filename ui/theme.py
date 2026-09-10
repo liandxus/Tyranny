@@ -114,13 +114,12 @@ class ThemeMixin:
 
         # ── 活动栏 ──
         self.nav.configure(bg=c["nav_bg"])
-        self.nav_files_btn.configure(bg=c["nav_bg"])
-        self.nav_tags_btn.configure(bg=c["nav_bg"])
-        # 更新 hover 颜色引用
-        self.nav_files_btn._nb_normal_bg = c["nav_bg"]
-        self.nav_files_btn._nb_hover_bg = c["nav_hover_bg"]
-        self.nav_tags_btn._nb_normal_bg = c["nav_bg"]
-        self.nav_tags_btn._nb_hover_bg = c["nav_hover_bg"]
+        # 四个按钮统一配色与 hover 引用，避免漏掉新增按钮导致底色不一致
+        for btn in (self.nav_files_btn, self.nav_tags_btn,
+                    self.nav_search_btn, self.nav_trash_btn):
+            btn.configure(bg=c["nav_bg"])
+            btn._nb_normal_bg = c["nav_bg"]
+            btn._nb_hover_bg = c["nav_hover_bg"]
         self._update_nav_icons()
 
         # ── 侧栏 ──
@@ -134,6 +133,20 @@ class ThemeMixin:
         self.trash_frame.configure(bg=c["sidebar_bg"])
         self.trash_body.configure(bg=c["sidebar_bg"])
         self.trash_header.configure(bg=c["sidebar_header_bg"])
+        # 搜索面板
+        self.search_frame.configure(bg=c["sidebar_bg"])
+        self.search_body.configure(bg=c["sidebar_bg"])
+        self.search_header.configure(bg=c["sidebar_header_bg"])
+        self.panel_search_entry.configure(
+            bg=c["search_bg"], fg=c["search_fg"],
+            highlightbackground=c["search_border"],
+            highlightcolor=c["search_border"],
+            insertbackground=c["toolbar_fg"])
+        self.panel_search_clear.configure(
+            bg=c["sidebar_header_bg"], fg=c["toolbar_fg"])
+        self.panel_search_clear._nb_normal_bg = c["sidebar_header_bg"]
+        self.panel_search_clear._nb_hover_bg = c["sidebar_item_selected"]
+        self.search_tree.tag_configure("hover", background=c["tree_hover_bg"])
         for w in (self.trash_title, self.trash_sort_btn, self.trash_empty_btn):
             w.configure(bg=c["sidebar_header_bg"], fg=c["sidebar_header_fg"])
         for w in (self.trash_sort_btn, self.trash_empty_btn):

@@ -18,76 +18,52 @@ def _make_image() -> tuple:
 
 def _photo(img: Image.Image) -> ImageTk.PhotoImage:
     """Image → PhotoImage（保持引用）"""
-    return ImageTk.PhotoImage(img)
+    ph = ImageTk.PhotoImage(img)
+    ph._pil = img   # 保留 PIL 引用，便于调试导出
+    return ph
 
 
 def folder_icon(color: str = "#888888") -> ImageTk.PhotoImage:
-    """📁 风格的文件夹图标"""
+    """📁 风格的文件夹图标（描边风格，激活/未激活都保持形状可辨）"""
     img, draw = _make_image()
 
-    # 上方标签片（缩小凸起）
-    draw.rectangle([4, 6, 9, 8], fill=color)
-
-    # 主体
-    draw.rectangle([3, 8, 21, 20], fill=color)
+    # 主体矩形（描边）
+    draw.rectangle([3, 7, 21, 20], outline=color, width=2)
+    # 左上凸起的文件夹标签（折线）
+    draw.line([(3, 7), (3, 4), (10, 4), (10, 7)], fill=color, width=2)
 
     return _photo(img)
 
 
 def tag_icon(color: str = "#888888") -> ImageTk.PhotoImage:
-    """书签图标（折角纸片，尖角朝右上）"""
+    """书签图标（折角纸片，尖角朝右上，描边风格）"""
     img, draw = _make_image()
 
-    # 主体（右上角切掉一块的五边形）
+    # 主体（右上角切掉一块的五边形，描边）
     draw.polygon([
         (3, 3),     # 左上
         (12, 3),    # 折线起点（上边）
         (21, 12),   # 折线终点（右边）
         (21, 21),   # 右下
         (3, 21),    # 左下
-    ], fill=color)
-
-    # 折回来的三角（用稍亮的颜色模拟纸背）
-    draw.polygon([
-        (12, 3),    # 折线起点
-        (21, 3),    # 原本的右上角
-        (21, 12),   # 折线终点
-    ], fill=_dim(color, 0.75))
-
-    return _photo(img)
-
-
-def files_icon(color: str = "#888888") -> ImageTk.PhotoImage:
-    """多文件堆叠图标（可替代 📁）"""
-    img, draw = _make_image()
-
-    # 底层文件
-    draw.rectangle([4, 5, 22, 21], fill=_dim(color, 0.7))
-    # 顶层文件
-    draw.polygon([
-        (2, 8),
-        (2, 20),
-        (20, 20),
-        (20, 4),
-        (6, 4),
-    ], fill=color)
+    ], outline=color, width=2)
+    # 折角示意（L 形细折痕）
+    draw.line([(12, 3), (12, 12), (21, 12)], fill=color, width=1)
 
     return _photo(img)
 
 
 def trash_icon(color: str = "#888888") -> ImageTk.PhotoImage:
-    """垃圾桶图标（应用内回收站）"""
+    """垃圾桶图标（描边风格，避免实心色块）"""
     img, draw = _make_image()
 
-    # 提手
-    draw.rectangle([9, 2, 15, 4], fill=color)
-    # 盖子
-    draw.rectangle([4, 5, 20, 7], fill=color)
-    # 桶身（竖直矩形）
-    draw.rectangle([6, 8, 18, 21], fill=color)
-    # 桶身竖纹
-    for x in (10, 12, 14):
-        draw.line([(x, 10), (x, 19)], fill=_dim(color, 0.55), width=1)
+    # 提手（倒 U 折线，两端接在盖子上）
+    draw.line([(9, 6), (9, 2), (15, 2), (15, 6)], fill=color, width=2)
+    # 盖子（横线）
+    draw.line([(4, 6), (20, 6)], fill=color, width=2)
+    # 桶身（略收底的梯形，描边）
+    draw.polygon([(6, 9), (18, 9), (17, 21), (7, 21)],
+                 outline=color, width=2)
 
     return _photo(img)
 
@@ -124,6 +100,20 @@ def moon_icon(color: str = "#888888") -> ImageTk.PhotoImage:
     draw.ellipse([7, 7, 17, 17], fill=color)
     # 切掉一块形成月牙
     draw.ellipse([11, 5, 19, 15], fill=(0, 0, 0, 0))
+
+    return _photo(img)
+
+
+def search_icon(color: str = "#888888") -> ImageTk.PhotoImage:
+    """搜索图标（放大镜：圆镜片 + 斜手柄）"""
+    img, draw = _make_image()
+
+    # 镜片（描边圆）
+    draw.ellipse([3, 3, 14, 14], outline=color, width=2)
+    # 手柄（从镜片右下向右下延伸）
+    draw.line([(13, 13), (20, 20)], fill=color, width=2)
+    # 手柄端点略加粗
+    draw.ellipse([19, 19, 21, 21], fill=color)
 
     return _photo(img)
 
@@ -299,11 +289,3 @@ def tree_arrow_down(color: str = "#888888", size: int = _TREE_ARROW_SIZE):
     cx = (x0 + x1) // 2
     draw.polygon([(x0, y0), (cx, y1), (x1, y0)], fill=color)
     return _photo(img)
-
-
-def _dim(hex_color: str, factor: float) -> str:
-    """颜色变暗"""
-    r = int(int(hex_color[1:3], 16) * factor)
-    g = int(int(hex_color[3:5], 16) * factor)
-    b = int(int(hex_color[5:7], 16) * factor)
-    return f"#{r:02x}{g:02x}{b:02x}"
