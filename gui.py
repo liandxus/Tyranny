@@ -74,6 +74,10 @@ class IndeXarApp(TitleBarMixin, FileTreeMixin, TagPanelMixin,
         self.current_panel = "files"
         self._current_note_path = None
 
+        # 导航历史（Alt + ←/→）
+        self._nav_history = []
+        self._nav_index = -1
+
         # 字号
         self._font_size = 11
         self._font_step = 1
@@ -126,6 +130,10 @@ class IndeXarApp(TitleBarMixin, FileTreeMixin, TagPanelMixin,
         self.root.bind("<ButtonRelease-1>", self._end_resize, add="+")
         self.root.bind("<Motion>", self._update_cursor, add="+")
         self.root.bind("<Leave>", lambda e: self.root.config(cursor=""), add="+")
+
+        # 导航快捷键：Alt + ← 后退 / Alt + → 前进
+        self.root.bind("<Alt-Left>", lambda e: self._go_back(), add="+")
+        self.root.bind("<Alt-Right>", lambda e: self._go_forward(), add="+")
 
         # 内容区鼠标事件（检测 wikilink 交互）
         self.content_text.bind("<ButtonRelease-1>", self._on_content_click)

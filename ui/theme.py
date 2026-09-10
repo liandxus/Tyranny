@@ -294,6 +294,7 @@ class ThemeMixin:
         self.content_body.configure(bg=c["app_bg"], highlightbackground=c["app_bg"])
         self.content_header.configure(bg=c["content_header_bg"])
         self.content_title.configure(bg=c["content_header_bg"], fg=c["content_header_fg"])
+        self._update_nav_buttons()
         self._close_file_btn.configure(bg=c["content_header_bg"])
         self._header_sep.configure(bg=c["content_header_bg"], fg=c.get("border", "#ccc"))
         self.text_container.configure(bg=c["content_bg"], highlightbackground=c["content_bg"])

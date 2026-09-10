@@ -108,12 +108,30 @@ class ContentViewMixin:
         self.content_header = tk.Frame(self.content_body)
         self.content_header.pack(fill=tk.X)
 
+        # 左侧：导航箭头（最先 pack，空间不足时优先保留）
+        self._nav_frame = tk.Frame(self.content_header)
+        self._nav_frame.pack(side=tk.LEFT, padx=(5, 0))
+
+        self._nav_back_btn = tk.Label(
+            self._nav_frame, text="←",
+            font=("Microsoft YaHei", 11),
+            padx=1, cursor="hand2")
+        self._nav_back_btn.pack(side=tk.LEFT)
+        self._nav_back_btn.bind("<Button-1>", lambda e: self._go_back())
+
+        self._nav_fwd_btn = tk.Label(
+            self._nav_frame, text="→",
+            font=("Microsoft YaHei", 11),
+            padx=1, cursor="hand2")
+        self._nav_fwd_btn.pack(side=tk.LEFT)
+        self._nav_fwd_btn.bind("<Button-1>", lambda e: self._go_forward())
+
         # 左侧：文件名/欢迎语
         self.content_title = tk.Label(
             self.content_header,
-            text="   选择一篇笔记开始阅读",
+            text="选择一篇笔记开始阅读",
             font=("Microsoft YaHei", 10),
-            anchor=tk.W, padx=14, pady=6,
+            anchor=tk.W, padx=8, pady=6,
         )
         self.content_title.pack(side=tk.LEFT)
 
@@ -140,56 +158,11 @@ class ContentViewMixin:
         )
         self._header_sep.pack(side=tk.RIGHT)
 
-        self.search_var = tk.StringVar()
-        # 内容变化时：控制清空按钮显隐；清空则恢复文件树
-        self.search_var.trace_add("write",
-                                  lambda *a: self._on_search_var_changed())
-        self.search_entry = tk.Entry(
-            self._header_right,
-            textvariable=self.search_var,
-            font=("Microsoft YaHei", 10),
-            relief=tk.FLAT, bd=0,
-            highlightthickness=1,
-            width=20,
-        )
-        self.search_entry.pack(side=tk.LEFT, padx=(0, 4))
-        self.search_entry.bind("<Return>", lambda e: self._do_search())
-
-        # 清空按钮：仅在有输入时显示，位于搜索按钮左侧
-        self.search_clear_lbl = tk.Label(
-            self._header_right, text="✕",
-            font=("Microsoft YaHei", 9),
-            cursor="hand2", padx=3,
-        )
-        self.search_clear_lbl.bind("<Button-1>",
-                                   lambda e: self._clear_search())
-        self.search_clear_lbl.bind("<Enter>", lambda e: (
-            self.search_clear_lbl.configure(fg="#e81123")))
-        self.search_clear_lbl.bind("<Leave>", lambda e: (
-            self.search_clear_lbl.configure(fg=self.colors["toolbar_fg"])))
-
-        self.search_btn = tk.Button(
-            self._header_right, text="搜索",
-            font=("Microsoft YaHei", 9),
-            relief=tk.RIDGE, bd=1, highlightthickness=0,
-            padx=8, pady=1, cursor="hand2",
-            command=self._do_search,
-        )
-        self.search_btn.pack(side=tk.LEFT, padx=(0, 4))
-
-        # 外部编辑器按钮
-        self.edit_btn = tk.Button(
-            self._header_right, text="编辑",
-            font=("Microsoft YaHei", 9),
-            relief=tk.RIDGE, bd=1, highlightthickness=0,
-            padx=6, pady=1, cursor="hand2",
-            command=self._open_current_in_editor,
-        )
-        self.edit_btn.pack(side=tk.LEFT, padx=(0, 8))
-
-        # 主题切换
+        # 右侧控件一律用 side=RIGHT 并按「从最右到最左」的顺序 pack：
+        # pack 是「先到先得」，这样空间不足时被压缩的是最后 pack 的搜索框，
+        # 而不是主题切换等按钮
         self.theme_frame = tk.Frame(self._header_right, cursor="hand2")
-        self.theme_frame.pack(side=tk.LEFT)
+        self.theme_frame.pack(side=tk.RIGHT)
 
         self._theme_sun_img = icon_renderer.sun_icon(self.colors["toolbar_fg"])
         self._theme_moon_img = icon_renderer.moon_icon(self.colors["nav_fg"])
@@ -209,6 +182,54 @@ class ContentViewMixin:
         self.theme_frame.bind("<Button-1>", lambda e: self._toggle_theme())
         self.theme_light_lbl.bind("<Button-1>", lambda e: self._toggle_theme())
         self.theme_dark_lbl.bind("<Button-1>", lambda e: self._toggle_theme())
+
+        # 外部编辑器按钮
+        self.edit_btn = tk.Button(
+            self._header_right, text="编辑",
+            font=("Microsoft YaHei", 9),
+            relief=tk.RIDGE, bd=1, highlightthickness=0,
+            padx=6, pady=1, cursor="hand2",
+            command=self._open_current_in_editor,
+        )
+        self.edit_btn.pack(side=tk.RIGHT, padx=(0, 8))
+
+        self.search_btn = tk.Button(
+            self._header_right, text="搜索",
+            font=("Microsoft YaHei", 9),
+            relief=tk.RIDGE, bd=1, highlightthickness=0,
+            padx=8, pady=1, cursor="hand2",
+            command=self._do_search,
+        )
+        self.search_btn.pack(side=tk.RIGHT, padx=(0, 4))
+
+        # 清空按钮：仅在有输入时显示，位于输入框与搜索按钮之间
+        self.search_clear_lbl = tk.Label(
+            self._header_right, text="✕",
+            font=("Microsoft YaHei", 9),
+            cursor="hand2", padx=3,
+        )
+        self.search_clear_lbl.bind("<Button-1>",
+                                   lambda e: self._clear_search())
+        self.search_clear_lbl.bind("<Enter>", lambda e: (
+            self.search_clear_lbl.configure(fg="#e81123")))
+        self.search_clear_lbl.bind("<Leave>", lambda e: (
+            self.search_clear_lbl.configure(fg=self.colors["toolbar_fg"])))
+
+        self.search_var = tk.StringVar()
+        # 内容变化时：控制清空按钮显隐；清空则恢复文件树
+        self.search_var.trace_add("write",
+                                  lambda *a: self._on_search_var_changed())
+        self.search_entry = tk.Entry(
+            self._header_right,
+            textvariable=self.search_var,
+            font=("Microsoft YaHei", 10),
+            relief=tk.FLAT, bd=0,
+            highlightthickness=1,
+            width=20,
+        )
+        # 最后 pack：宽度不足时优先收缩输入框
+        self.search_entry.pack(side=tk.RIGHT, padx=(0, 4))
+        self.search_entry.bind("<Return>", lambda e: self._do_search())
 
         # ── header 宽度变化时自动截断文件名 ──
         self.content_header.bind("<Configure>", self._on_header_resize)
@@ -330,14 +351,16 @@ class ContentViewMixin:
         self.content_text.configure(state=tk.DISABLED)
 
 
-    def _display_note(self, rel_path):
+    def _display_note(self, rel_path, _record=True):
         content = read_note(rel_path)
         if content is None:
             self._set_content(f"⚠️  找不到文件：{rel_path}.md")
             return
+        if _record:
+            self._push_nav_history(rel_path)
         self._current_note_path = rel_path
         name = rel_path.split("/")[-1]
-        self._full_display_name = f"   📄 {name}.md"
+        self._full_display_name = f"📄 {name}.md"
         self._update_title_display()
         self._close_file_btn.pack(side=tk.LEFT, padx=(0, 4))
         self._render_markdown(content)
@@ -374,6 +397,66 @@ class ContentViewMixin:
         if not parent:
             return DATA_DIR
         return os.path.join(DATA_DIR, parent.replace("/", os.sep))
+
+    # ── 导航历史（Alt + ←/→ 与头部箭头） ──
+
+    def _push_nav_history(self, rel_path):
+        """记录一次导航。同一篇笔记不重复入栈，
+        因此切主题/改字号/图片模式/文件监听等重渲染不会污染历史"""
+        if not rel_path:
+            return
+        hist, idx = self._nav_history, self._nav_index
+        if 0 <= idx < len(hist) and hist[idx] == rel_path:
+            return
+        del hist[idx + 1:]          # 在历史中间跳转 → 丢弃「前进」分支
+        hist.append(rel_path)
+        self._nav_index = len(hist) - 1
+        if len(hist) > 200:         # 限制长度，避免长时间使用后无限增长
+            del hist[:len(hist) - 200]
+            self._nav_index = len(hist) - 1
+        self._update_nav_buttons()
+
+    def _go_back(self):
+        """后退（Alt + ← 或点击 ←）"""
+        if self._nav_index <= 0:
+            return "break"
+        self._nav_index -= 1
+        self._goto_history_entry(self._nav_history[self._nav_index])
+        return "break"
+
+    def _go_forward(self):
+        """前进（Alt + → 或点击 →）"""
+        if self._nav_index >= len(self._nav_history) - 1:
+            return "break"
+        self._nav_index += 1
+        self._goto_history_entry(self._nav_history[self._nav_index])
+        return "break"
+
+    def _goto_history_entry(self, rel_path):
+        """跳到历史中的某篇笔记（不写入历史，否则前后指针会被打乱）"""
+        self._display_note(rel_path, _record=False)
+        try:
+            self.tree.selection_set(f"f:{rel_path}")
+            self.tree.see(f"f:{rel_path}")
+        except Exception:
+            pass
+        self._update_nav_buttons()
+
+    def _update_nav_buttons(self):
+        """按历史状态刷新箭头：不可用时置灰且不响应点击"""
+        if not hasattr(self, "_nav_back_btn"):
+            return
+        c = self.colors
+        bg = c["content_header_bg"]
+        dim = "#b8b8b8" if self.theme_mode == "light" else "#5a5a5a"
+        normal = c["content_header_fg"]
+        can_back = self._nav_index > 0
+        can_fwd = self._nav_index < len(self._nav_history) - 1
+        self._nav_frame.configure(bg=bg)
+        for btn, ok in ((self._nav_back_btn, can_back),
+                        (self._nav_fwd_btn, can_fwd)):
+            btn.configure(bg=bg, fg=normal if ok else dim,
+                          cursor="hand2" if ok else "")
 
     def _on_content_click(self, event):
         """内容区点击——内部链接直接跳转；外部链接需 Ctrl+点击"""
@@ -486,30 +569,83 @@ class ContentViewMixin:
                 f"请确认 data/ 目录下是否存在该名称的 .md 文件。"
             )
 
+    def _header_fixed_width(self):
+        """头部不参与压缩的宽度：导航箭头 + 关闭按钮 + 分隔线 + 右侧按钮组
+        （已扣除搜索输入框自身，避免宽度调整时来回振荡；
+         46 为各控件 pack 间距的粗略补偿，reqwidth 不含 pack padx）"""
+        used = self._nav_frame.winfo_reqwidth()
+        if self._close_file_btn.winfo_ismapped():
+            used += self._close_file_btn.winfo_reqwidth()
+        used += self._header_sep.winfo_reqwidth()
+        used += max(0, self._header_right.winfo_reqwidth()
+                    - self.search_entry.winfo_reqwidth())
+        return used + 36
+
+    def _update_header_priority(self, total):
+        """空间不足时隐藏次要按钮：先牺牲「编辑」
+        （文件树右键菜单里的「用外部编辑器打开」功能等价）；
+        阈值只看总宽度，避免和自身显隐互相触发导致抖动"""
+        if total <= 1:
+            return
+        narrow = total < 420
+        mapped = self.edit_btn.winfo_ismapped()
+        if narrow and mapped:
+            self.edit_btn.pack_forget()
+        elif not narrow and not mapped:
+            self.edit_btn.pack(side=tk.RIGHT, padx=(0, 8),
+                               after=self.theme_frame)
+
+    def _update_search_entry_width(self):
+        """按可用宽度收缩搜索框（下限 6 字符），保证右侧按钮不被挤掉"""
+        total = self.content_header.winfo_width()
+        if total <= 1:
+            return
+        # 给文件名预留的宽度随窗口收缩，极窄时不再强留
+        reserve = max(50, min(90, total // 6))
+        avail = total - self._header_fixed_width() - reserve
+        cols = max(6, min(20, avail // 8))
+        if cols != getattr(self, "_entry_cols", None):
+            self._entry_cols = cols
+            self.search_entry.configure(width=cols)
+
     def _update_title_display(self, event=None):
         """根据 header 可用宽度动态截断文件名"""
         full = getattr(self, '_full_display_name', None)
         if not full:
             return
-        # 估算可用宽度：header 宽度 - 右侧搜索区 (~380px) - 间距
-        avail = self.content_header.winfo_width() - 400
+        total = self.content_header.winfo_width()
+        if total < 360:
+            # 极窄：文件名整体让位，优先保证搜索框与按钮完整可见
+            if self.content_title.winfo_ismapped():
+                self.content_title.pack_forget()
+            return
+        if not self.content_title.winfo_ismapped():
+            self.content_title.pack(side=tk.LEFT, after=self._nav_frame)
+        avail = max(80, total - self._header_fixed_width() - 24)
         ch_w = 9  # 中文约 17px, 英文约 9px, 粗略取 10
-        max_ch = max(10, avail // ch_w)
+        max_ch = max(8, avail // ch_w)
         if len(full) <= max_ch:
             self.content_title.configure(text=full)
         else:
             self.content_title.configure(text=full[:max_ch-3] + "...")
 
-    def _on_header_resize(self, event):
+    def _on_header_resize(self, event=None):
+        """头部宽度变化：先决定哪些按钮保留，再收缩搜索框与文件名"""
+        total = self.content_header.winfo_width()
+        self._update_header_priority(total)
+        self._update_search_entry_width()
         self._update_title_display()
 
     def _close_file(self):
         """关闭当前浏览的文件，回到欢迎页"""
         self._current_note_path = None
         self._full_display_name = None
+        self._nav_history = []
+        self._nav_index = -1
+        self._update_nav_buttons()
         self._close_file_btn.pack_forget()
         self._refresh_file_tags()
-        self.content_title.configure(text="   选择一篇笔记开始阅读")
+        self.content_title.configure(text="选择一篇笔记开始阅读")
         self.content_text.configure(state=tk.NORMAL)
         self.content_text.delete(1.0, tk.END)
         self.content_text.configure(state=tk.DISABLED)
@@ -519,7 +655,7 @@ class ContentViewMixin:
         self._current_note_path = None
         self._close_file_btn.pack_forget()
         self._refresh_file_tags()
-        self.content_title.configure(text="   选择一篇笔记开始阅读")
+        self.content_title.configure(text="选择一篇笔记开始阅读")
         self.content_text.configure(state=tk.NORMAL)
         self.content_text.delete(1.0, tk.END)
         self.content_text.insert(tk.END, text)

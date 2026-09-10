@@ -62,8 +62,8 @@ class SearchMixin:
         """搜索框内容变化：有输入才显示清空按钮；清空则恢复文件树"""
         try:
             if self.search_var.get().strip():
-                self.search_clear_lbl.pack(side=tk.LEFT, padx=(0, 2),
-                                           before=self.search_btn)
+                self.search_clear_lbl.pack(side=tk.RIGHT, padx=(0, 2),
+                                           after=self.search_btn)
             else:
                 self.search_clear_lbl.pack_forget()
                 if self.current_panel == "files":
