@@ -51,6 +51,15 @@ def _build_name_map():
     return mapping
 
 
+def invalidate_name_map():
+    """失效笔记名映射缓存。
+
+    程序内的新建/删除/重命名/移动会自行重置；此函数供外部文件变化
+    （轮询检测到新增或改名）后调用，保证内部链接能解析到最新的笔记名。"""
+    global NOTE_NAME_MAP
+    NOTE_NAME_MAP = None
+
+
 def find_note_by_name(name):
     """
     通过笔记显示名（不含路径和后缀）查找完整相对路径

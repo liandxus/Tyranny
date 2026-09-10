@@ -362,7 +362,10 @@ class ContentViewMixin:
         name = rel_path.split("/")[-1]
         self._full_display_name = f"📄 {name}.md"
         self._update_title_display()
-        self._close_file_btn.pack(side=tk.LEFT, padx=(0, 4))
+        # before= 让它在打包顺序上排在右侧搜索区之前（仍紧跟文件名），
+        # 否则作为最后一个 pack 的控件，窗口一变窄就最先被裁掉
+        self._close_file_btn.pack(side=tk.LEFT, padx=(0, 4),
+                                  before=self._header_right)
         self._render_markdown(content)
         self._render_backlinks(rel_path)
         self.content_text.configure(state=tk.DISABLED)
@@ -465,7 +468,11 @@ class ContentViewMixin:
             ctrl_down = bool(event.state & 0x4)
             for tag in self.content_text.tag_names(pos):
                 if tag.startswith("wikilink_"):
-                    self._navigate_to_link(tag[9:])
+                    # 从映射取完整笔记名（tag 名不能含空格，见 markdown_renderer）
+                    target = getattr(self.content_text,
+                                     "_wikilink_map", {}).get(tag)
+                    if target:
+                        self._navigate_to_link(target)
                     return
                 if tag.startswith("extlink_") and ctrl_down:
                     url = getattr(self.content_text,
@@ -574,7 +581,10 @@ class ContentViewMixin:
         （已扣除搜索输入框自身，避免宽度调整时来回振荡；
          46 为各控件 pack 间距的粗略补偿，reqwidth 不含 pack padx）"""
         used = self._nav_frame.winfo_reqwidth()
-        if self._close_file_btn.winfo_ismapped():
+        # 关闭按钮：只要打开了笔记就无条件为它预留空间。
+        # 不能按「当前是否可见」判断——它一旦被挤出可视区，
+        # 就不再计入固定宽度，从而永远挤不回来
+        if getattr(self, "_full_display_name", None):
             used += self._close_file_btn.winfo_reqwidth()
         used += self._header_sep.winfo_reqwidth()
         used += max(0, self._header_right.winfo_reqwidth()
@@ -621,13 +631,38 @@ class ContentViewMixin:
             return
         if not self.content_title.winfo_ismapped():
             self.content_title.pack(side=tk.LEFT, after=self._nav_frame)
-        avail = max(80, total - self._header_fixed_width() - 24)
-        ch_w = 9  # 中文约 17px, 英文约 9px, 粗略取 10
-        max_ch = max(8, avail // ch_w)
-        if len(full) <= max_ch:
-            self.content_title.configure(text=full)
-        else:
-            self.content_title.configure(text=full[:max_ch-3] + "...")
+        # 不用 max(80, ...) 强制下限：空间不足时文件名要让位，
+        # 保证后面的关闭按钮始终可见
+        avail = total - self._header_fixed_width() - 24
+        self.content_title.configure(text=self._fit_title(full, avail))
+
+    def _fit_title(self, full, avail_px):
+        """按字体实际宽度裁剪文件名。
+
+        中文与英文字宽差异很大（约 17px vs 9px），按字符数估算会让
+        中文文件名占用两倍空间，把关闭按钮挤出可视区。"""
+        if avail_px <= 0:
+            return "…"
+        try:
+            from tkinter import font as tkfont
+            # 标题字体固定不变，缓存 Font 对象，避免拖动窗口时反复创建
+            f = getattr(self, "_title_font", None)
+            if f is None:
+                self._title_font = tkfont.Font(
+                    font=self.content_title.cget("font"))
+                f = self._title_font
+        except Exception:
+            return full
+        if f.measure(full) <= avail_px:
+            return full
+        ellipsis = "..."
+        ell_w = f.measure(ellipsis)
+        out = ""
+        for ch in full:
+            if f.measure(out + ch) + ell_w > avail_px:
+                break
+            out += ch
+        return (out + ellipsis) if out else ellipsis
 
     def _on_header_resize(self, event=None):
         """头部宽度变化：先决定哪些按钮保留，再收缩搜索框与文件名"""

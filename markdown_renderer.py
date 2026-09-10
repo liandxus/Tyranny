@@ -42,8 +42,9 @@ def render_markdown(text_widget, md_text, link_callback=None, font_size=11,
 
     # 清理上一次渲染留下的动态链接标签，防止颜色残留
     _cleanup_dynamic_tags(text_widget)
-    # 重置外链映射，并依背景预计算外链颜色
+    # 重置链接映射，并依背景预计算外链颜色
     text_widget._extlink_map = {}
+    text_widget._wikilink_map = {}
     try:
         _ext_dark = _is_dark_color(text_widget.cget("bg"))
     except Exception:
@@ -59,8 +60,13 @@ def render_markdown(text_widget, md_text, link_callback=None, font_size=11,
     # [[wikilink]] 预处理 → 标准 markdown 链接（协议前缀标记内部链接）
     md_text = _preprocess_wikilinks(md_text)
 
-    # 使用 markdown 库转换为 HTML（extra 扩展支持表格、脚注、围栏代码块等）
-    html = markdown.markdown(md_text, extensions=['extra'])
+    # ~~删除线~~ → <del>（markdown 库的 extra 扩展不含 GFM 删除线语法）
+    md_text = _preprocess_strikethrough(md_text)
+
+    # 使用 markdown 库转换为 HTML：
+    # extra 提供表格、围栏代码块、脚注等；sane_lists 让有序/无序列表按
+    # 标准规则解析（缺省时紧邻的 ol 与 ul 会被合并成一个列表）
+    html = markdown.markdown(md_text, extensions=['extra', 'sane_lists'])
 
     # 配置 Text 标签样式（自动适配亮/暗主题）
     _configure_tags_with_size(text_widget, font_size)
@@ -77,6 +83,30 @@ def render_markdown(text_widget, md_text, link_callback=None, font_size=11,
 # ══════════════════════════════════
 # 内部链接预处理
 # ══════════════════════════════════
+
+def _preprocess_strikethrough(text):
+    """把 GFM 删除线 ~~文字~~ 转成 <del>文字</del>。
+
+    markdown 库的 extra 扩展不包含删除线语法，这里自行预处理；
+    围栏代码块与行内代码内的 ~~ 保持原样。"""
+    out = []
+    in_fence = False
+    for line in text.split("\n"):
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            out.append(line)
+            continue
+        if in_fence:
+            out.append(line)
+            continue
+        # 按行内代码切分，只处理非代码段
+        parts = re.split(r"(`+[^`]*`+)", line)
+        for i in range(0, len(parts), 2):
+            parts[i] = re.sub(r"~~(?=\S)(.+?)(?<=\S)~~",
+                              r"<del>\1</del>", parts[i])
+        out.append("".join(parts))
+    return "\n".join(out)
+
 
 def _looks_like_note_target(href):
     """判断非协议链接是否指向站内笔记：结尾为 .md，或整段没有扩展名"""
@@ -125,7 +155,8 @@ class _MarkdownHTMLRenderer(HTMLParser):
 
         # 行内样式栈：元素为 'bold'|'italic'|'code_inline'|('wikilink', target)|('extlink', url)
         self._stack = []
-        self._ext_idx = 0  # 外部链接动态 tag 计数器
+        self._ext_idx = 0      # 外部链接动态 tag 计数器
+        self._wikilink_idx = 0  # 内部链接动态 tag 计数器
 
         # ── 代码块状态 ──
         self._in_pre = False
@@ -133,7 +164,8 @@ class _MarkdownHTMLRenderer(HTMLParser):
 
         # ── 列表状态 ──
         self._list_depth = 0      # 嵌套深度
-        self._ol_counters = []    # 每层有序列表计数器
+        self._list_stack = []     # 每层 [类型('ul'/'ol'), 下一个编号]
+        self._li_fresh = False    # 刚插入 li 项目符号，用于跳过随后的格式化空白
 
         # ── 链接状态 ──
         self._anchor_title = ""     # 当前 <a> 的 title，供图片悬浮提示使用
@@ -216,21 +248,19 @@ class _MarkdownHTMLRenderer(HTMLParser):
         # ── 列表 ──
         elif tag in ('ul', 'ol'):
             self._list_depth += 1
-            if tag == 'ol':
-                if len(self._ol_counters) < self._list_depth:
-                    self._ol_counters.append(1)
-                else:
-                    self._ol_counters[self._list_depth - 1] = 1
+            self._list_stack.append([tag, 1])   # 每层独立记录类型与编号
         elif tag == 'li':
             self._insert(self._list_bullet())
+            self._li_fresh = True
 
     def _list_bullet(self):
-        """返回当前列表深度的项目符号"""
+        """返回当前列表深度的项目符号（按该层自身的类型决定圆点或编号）"""
         indent = "  " * (self._list_depth - 1)
-        # 检查当前最内层是否为有序列表
-        if self._list_depth > 0 and len(self._ol_counters) >= self._list_depth:
-            num = self._ol_counters[self._list_depth - 1]
-            self._ol_counters[self._list_depth - 1] += 1
+        if not self._list_stack:
+            return f"{indent}• "
+        kind, num = self._list_stack[-1]
+        if kind == 'ol':
+            self._list_stack[-1][1] = num + 1
             return f"{indent}{num}. "
         return f"{indent}• "
 
@@ -303,9 +333,12 @@ class _MarkdownHTMLRenderer(HTMLParser):
 
         # ── 列表收尾 ──
         elif tag == 'li':
+            self._li_fresh = False
             self._insert('\n')
         elif tag in ('ul', 'ol'):
             self._list_depth = max(0, self._list_depth - 1)
+            if self._list_stack:
+                self._list_stack.pop()
 
     # ── 文本数据 ──
 
@@ -320,6 +353,13 @@ class _MarkdownHTMLRenderer(HTMLParser):
             self._current_cell += unescape(data)
             return
 
+        # <li> 与内容之间的格式化空白（HTML 源码里的换行）不渲染，
+        # 否则松散列表里项目符号会与文字被拆成两行
+        if self._li_fresh:
+            self._li_fresh = False
+            if not data.strip():
+                return
+
         # 普通文本：渲染
         self._insert(unescape(data))
 
@@ -330,15 +370,17 @@ class _MarkdownHTMLRenderer(HTMLParser):
         tags = list(extra_tags)
         for s in self._stack:
             if isinstance(s, tuple) and s[0] == 'wikilink':
-                tag_name = f'wikilink_{s[1]}'
+                # 用索引 tag + 映射表：Tk 的 tag 名不能含空格（会按空格分裂），
+                # 而笔记名本身可能带空格，完整名字存映射供点击时还原
+                tag_name = f'wikilink_{self._wikilink_idx}'
+                self._wikilink_idx += 1
                 tags.append(tag_name)
-                # 确保 wikilink 标签已配置
-                try:
-                    self.w.tag_configure(tag_name)
-                except Exception:
-                    self.w.tag_configure(tag_name,
-                        foreground="#569cd6", underline=True,
-                        font=("Microsoft YaHei", self.fs))
+                self.w.tag_configure(tag_name,
+                    foreground="#569cd6", underline=True,
+                    font=("Microsoft YaHei", self.fs))
+                if not hasattr(self.w, "_wikilink_map"):
+                    self.w._wikilink_map = {}
+                self.w._wikilink_map[tag_name] = s[1]
             elif isinstance(s, tuple) and s[0] == 'extlink':
                 tag_name = f'extlink_{self._ext_idx}'
                 self._ext_idx += 1
@@ -747,6 +789,7 @@ def _cleanup_dynamic_tags(text_widget):
         if tag.startswith("wikilink_") or tag.startswith("extlink_"):
             text_widget.tag_delete(tag)
     text_widget._extlink_map = {}
+    text_widget._wikilink_map = {}
 
 
 # ══════════════════════════════════

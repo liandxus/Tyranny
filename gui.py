@@ -10,7 +10,8 @@ import json
 import os
 import re
 from file_handler import (list_notes, list_notes_tree, read_note, get_tag_index,
-                          build_tag_index, build_backlink_index, intersect_tags)
+                          build_tag_index, build_backlink_index, intersect_tags,
+                          invalidate_name_map)
 from theme_manager import VSCodeTheme
 from editor_detect import detect_editors
 import search_engine
@@ -312,6 +313,7 @@ class IndeXarApp(TitleBarMixin, FileTreeMixin, TagPanelMixin,
         try:
             build_tag_index()
             build_backlink_index()
+            invalidate_name_map()
         except Exception:
             pass
         self._refresh_tags()
