@@ -42,10 +42,23 @@ class ShellMixin:
         self.nav_tags_btn.pack(fill=tk.X, ipady=10, pady=(4, 0))
         self.nav_tags_btn.bind("<Button-1>", lambda e: self._show_tags())
 
+        self._nav_trash_img = icon_renderer.trash_icon(
+            self.colors["nav_fg"]
+        )
+        self.nav_trash_btn = tk.Label(
+            self.nav, image=self._nav_trash_img,
+            bg=self.colors["nav_bg"],
+            cursor="hand2",
+        )
+        self.nav_trash_btn.pack(fill=tk.X, ipady=10, pady=(4, 0))
+        self.nav_trash_btn.bind("<Button-1>", lambda e: self._show_trash())
+
         # ── hover 效果 ──
         _add_hover_bg(self.nav_files_btn,
                       self.colors["nav_bg"], self.colors["nav_hover_bg"])
         _add_hover_bg(self.nav_tags_btn,
+                      self.colors["nav_bg"], self.colors["nav_hover_bg"])
+        _add_hover_bg(self.nav_trash_btn,
                       self.colors["nav_bg"], self.colors["nav_hover_bg"])
 
     # ── 侧栏面板 ──
@@ -113,6 +126,7 @@ class ShellMixin:
             return
         self.current_panel = "files"
         self.tag_frame.grid_remove()
+        self.trash_frame.grid_remove()
         self.file_tree_frame.grid(row=0, column=0, sticky="nsew")
         self._restore_sidebar_if_collapsed()
         self._update_nav_icons()
@@ -128,12 +142,27 @@ class ShellMixin:
             return
         self.current_panel = "tags"
         self.file_tree_frame.grid_remove()
+        self.trash_frame.grid_remove()
         self.tag_frame.grid(row=0, column=0, sticky="nsew")
         self._restore_sidebar_if_collapsed()
         self._update_nav_icons()
         self._refresh_tags()
         self._apply_file_tags_visibility()
         self._refresh_file_tags()
+
+    def _show_trash(self, toggle=True):
+        """切换到回收站面板"""
+        if (toggle and self.current_panel == "trash"
+                and self._sidebar_width > 0):
+            self._toggle_sidebar()
+            return
+        self.current_panel = "trash"
+        self.file_tree_frame.grid_remove()
+        self.tag_frame.grid_remove()
+        self.trash_frame.grid(row=0, column=0, sticky="nsew")
+        self._restore_sidebar_if_collapsed()
+        self._update_nav_icons()
+        self._refresh_trash()
 
     def _restore_sidebar_if_collapsed(self):
         """如果侧栏被收起（拖拽或菜单隐藏），展开到记忆/默认宽度"""
@@ -158,6 +187,10 @@ class ShellMixin:
             active if self.current_panel == "tags" else inactive
         )
         self.nav_tags_btn.configure(image=self._nav_tags_img)
+        self._nav_trash_img = icon_renderer.trash_icon(
+            active if self.current_panel == "trash" else inactive
+        )
+        self.nav_trash_btn.configure(image=self._nav_trash_img)
 
     # ══════════════════════════════════
     # 文件树

@@ -100,11 +100,15 @@ class FileTreeMixin:
         )
         self.tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-        self.tree = ttk.Treeview(self.tree_container, show="tree", selectmode="browse")
+        self.tree = ttk.Treeview(self.tree_container, show="tree",
+                                 selectmode="extended")
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.tree_scroll.configure(command=self.tree.yview)
         self.tree.configure(yscrollcommand=self.tree_scroll.set)
         self.tree.bind("<<TreeviewSelect>>", self._on_file_selected)
+        # 快捷键：Del 删除、F2 重命名（仅文件树获得焦点时生效）
+        self.tree.bind("<Delete>", lambda e: self._tree_context_delete())
+        self.tree.bind("<F2>", lambda e: self._rename_selected())
 
         # ── 文件树行悬停高亮 ──
         self.tree.bind("<Motion>", self._on_tree_motion)
@@ -169,15 +173,27 @@ class FileTreeMixin:
         self._right_clicking = True
 
         if iid:
-            self.tree.selection_set(iid)
+            # 右键点的项不在当前选中集合内 → 选择切换到该项；
+            # 已在集合内 → 保留多选，供批量操作使用
+            if iid not in self.tree.selection():
+                self.tree.selection_set(iid)
             vals = self.tree.item(iid, "values")
             is_dir = vals and (vals[1] == "True" or vals[1] is True)
-            if is_dir:
+            selected = self._selected_tree_items()
+
+            if len(selected) > 1:
+                n = len(selected)
+                items = [
+                    (f"删除这 {n} 个项目", self._tree_context_delete),
+                    (f"移动这 {n} 个项目到…", self._tree_context_move),
+                ]
+            elif is_dir:
                 items = [
                     ("新建笔记", self._tree_context_new),
                     ("新建文件夹", self._tree_context_new_folder),
                     None,
-                    ("重命名文件夹", self._tree_context_rename),
+                    ("重命名文件夹", self._rename_selected),
+                    ("移动到…", self._tree_context_move),
                     ("删除文件夹", self._tree_context_delete),
                     None,
                     ("在资源管理器中打开", self._tree_context_reveal),
@@ -188,8 +204,9 @@ class FileTreeMixin:
                     ("新建文件夹", self._tree_context_new_folder),
                     None,
                     ("外部编辑器打开", self._open_in_editor),
+                    ("移动到…", self._tree_context_move),
                     None,
-                    ("重命名", self._tree_context_rename),
+                    ("重命名", self._rename_selected),
                     ("删除", self._tree_context_delete),
                     None,
                     ("在资源管理器中打开", self._tree_context_reveal),
@@ -322,35 +339,120 @@ class FileTreeMixin:
         entry.bind("<Return>", lambda e: do_rename())
         self._theme_dialog_body(dialog)
 
+    def _selected_tree_items(self):
+        """
+        返回选中的 [(相对路径, is_dir), ...]。
+        已被选中文件夹包含的子项会被剔除，避免重复处理。
+        """
+        raw = []
+        for sel in self.tree.selection():
+            vals = self.tree.item(sel, "values")
+            if not vals:
+                continue
+            path = vals[0]
+            if not isinstance(path, str):
+                continue
+            if path == "__header__" or path.startswith("__snippet_"):
+                continue
+            is_dir = (vals[1] == "True" or vals[1] is True)
+            raw.append((path, is_dir))
+
+        paths = {p for p, _ in raw}
+        result = []
+        for path, is_dir in raw:
+            if any(other != path and path.startswith(other + "/")
+                   for other in paths):
+                continue          # 该路径位于另一个被选中的文件夹内
+            result.append((path, is_dir))
+        return result
+
+    def _rename_selected(self):
+        """F2 / 右键重命名：仅支持单个文件或文件夹"""
+        if len(self.tree.selection()) != 1:
+            self.status_left.configure(text="   重命名仅支持单个文件或文件夹")
+            return
+        self._tree_context_rename()
+
     def _tree_context_delete(self):
-        """右键 → 删除（文件/文件夹）"""
-        sel = self.tree.selection()
-        if not sel:
+        """右键 / Del → 删除（支持多选，移入回收站）"""
+        items = self._selected_tree_items()
+        if not items:
             return
-        vals = self.tree.item(sel[0], "values")
-        if not vals:
-            return
-        iid, is_dir = vals[0], vals[1]
-        is_dir = (is_dir == "True" or is_dir is True)
 
-        name = os.path.basename(iid)
-        item_type = "文件夹" if is_dir else "笔记"
-        if is_dir:
-            msg = f"确定删除文件夹「{name}」及其所有内容？\n此操作不可撤销。"
-        else:
-            msg = f"确定删除笔记「{name}」？\n此操作不可撤销。"
-
-        confirm = messagebox.askyesno(f"确认删除{item_type}", msg)
-        if confirm:
+        if len(items) == 1:
+            path, is_dir = items[0]
+            name = os.path.basename(path)
             if is_dir:
-                from file_handler import delete_folder
-                delete_folder(iid)
+                title = "删除文件夹"
+                msg = f"确实要将此文件夹及其内容放入回收站吗？\n\n{name}"
             else:
-                from file_handler import delete_note
-                delete_note(iid)
-            self._refresh_file_tree()
-            self._snapshot_files()  # 抑制轮询自触发
+                title = "删除文件"
+                msg = f"确实要将此文件放入回收站吗？\n\n{name}"
+        else:
+            names = "\n".join(os.path.basename(p) for p, _ in items[:8])
+            more = f"\n…等共 {len(items)} 个项目" if len(items) > 8 else ""
+            title = "删除多个项目"
+            msg = (f"确实要将这 {len(items)} 个项目放入回收站吗？\n\n"
+                   f"{names}{more}")
+
+        if not messagebox.askyesno(title, msg):
+            return
+
+        from file_handler import delete_folder, delete_note
+        for path, is_dir in items:
+            if is_dir:
+                delete_folder(path)
+            else:
+                delete_note(path)
+
+        # 当前打开的笔记被删除 → 清空内容区
+        cur = self._current_note_path
+        if cur and any(p == cur or cur.startswith(p + "/") for p, _ in items):
             self._set_content("")
+            self._current_note_path = None
+
+        self._refresh_file_tree()
+        self._snapshot_files()      # 抑制轮询自触发
+        self._rebuild_indexes()
+        self.status_left.configure(text=f"   已移入回收站 {len(items)} 项")
+
+    def _tree_context_move(self):
+        """右键 → 移动到…（支持多选）"""
+        items = self._selected_tree_items()
+        if not items:
+            return
+
+        from tkinter import filedialog
+        from file_handler import DATA_DIR, move_item
+
+        abs_dir = filedialog.askdirectory(
+            parent=self.root, title="选择目标文件夹",
+            initialdir=DATA_DIR, mustexist=True)
+        if not abs_dir:
+            return
+
+        rel = os.path.relpath(abs_dir, DATA_DIR).replace("\\", "/")
+        if rel.startswith(".."):
+            messagebox.showwarning("无法移动",
+                                   "目标文件夹必须位于笔记库（data）内。")
+            return
+        target = "" if rel == "." else rel
+
+        moved, failed = 0, []
+        for path, is_dir in items:
+            if move_item(path, target, is_dir):
+                moved += 1
+            else:
+                failed.append(os.path.basename(path))
+
+        self._refresh_file_tree()
+        self._snapshot_files()
+        self._rebuild_indexes()
+
+        msg = f"已移动 {moved} 项到「{target or '根目录'}」"
+        if failed:
+            msg += f"，{len(failed)} 项失败（重名或不可移动）"
+        self.status_left.configure(text=f"   {msg}")
 
     def _tree_context_reveal(self):
         """右键 → 在资源管理器中打开"""
@@ -409,7 +511,36 @@ class FileTreeMixin:
             subprocess.Popen(["notepad.exe", filepath])
 
 
+    def _collect_expanded_dirs(self):
+        """收集当前处于展开状态的目录相对路径（刷新前调用）"""
+        expanded = set()
+
+        def walk(parent):
+            for iid in self.tree.get_children(parent):
+                vals = self.tree.item(iid, "values")
+                if vals and (vals[1] == "True" or vals[1] is True):
+                    if self.tree.item(iid, "open"):
+                        expanded.add(vals[0])
+                    walk(iid)
+
+        walk("")
+        return expanded
+
+    def _restore_expanded_dirs(self, expanded):
+        """按路径恢复目录的展开状态（刷新后调用）"""
+        def walk(parent):
+            for iid in self.tree.get_children(parent):
+                vals = self.tree.item(iid, "values")
+                if vals and (vals[1] == "True" or vals[1] is True):
+                    if vals[0] in expanded:
+                        self.tree.item(iid, open=True)
+                    walk(iid)
+
+        walk("")
+
     def _refresh_file_tree(self):
+        # 整树重建会丢失展开状态，先记下来，重建后恢复
+        expanded = self._collect_expanded_dirs()
         for item in self.tree.get_children():
             self.tree.delete(item)
         tree = list_notes_tree()
@@ -418,6 +549,7 @@ class FileTreeMixin:
             self.status_left.configure(text="   0 个笔记")
             return
         count = self._populate_tree("", tree)
+        self._restore_expanded_dirs(expanded)
         self.status_left.configure(text=f"   {count} 个笔记")
 
     def _populate_tree(self, parent_iid, items):
@@ -448,6 +580,9 @@ class FileTreeMixin:
     def _on_file_selected(self, event):
         selected = self.tree.selection()
         if not selected:
+            return
+        # 多选时不触发打开/展开，交给批量操作处理
+        if len(selected) > 1:
             return
         vals = self.tree.item(selected[0], "values")
         if not vals:

@@ -1,10 +1,14 @@
 import os
 import re
 import json
+import shutil
+import time
 import frontmatter
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 INDEX_FILE = os.path.join(os.path.dirname(__file__), "index.json")
+# 回收站目录（以 . 开头，不参与笔记枚举与文件树展示）
+TRASH_DIR = os.path.join(DATA_DIR, ".trash")
 
 
 def list_notes():
@@ -74,6 +78,11 @@ def read_note(rel_path):
 
 # ── 内部函数 ──
 
+def _is_hidden(name):
+    """以 . 开头的内部文件/目录（如回收站 .trash）不参与笔记枚举"""
+    return name.startswith(".")
+
+
 def _walk(base_dir, prefix=""):
     """递归遍历，返回扁平文件列表"""
     items = []
@@ -84,6 +93,8 @@ def _walk(base_dir, prefix=""):
     except PermissionError:
         return items
     for entry in entries:
+        if _is_hidden(entry):
+            continue  # 跳过回收站等内部目录
         full = os.path.join(base_dir, entry)
         rel = os.path.join(prefix, entry).replace("\\", "/") if prefix else entry
         if os.path.isdir(full):
@@ -112,6 +123,7 @@ def get_all_subdirs():
         return []
     result = []
     for root, dirs, _ in os.walk(DATA_DIR):
+        dirs[:] = [d for d in dirs if not _is_hidden(d)]  # 剪枝：跳过回收站
         for d in sorted(dirs):
             full = os.path.join(root, d)
             rel = os.path.relpath(full, DATA_DIR).replace("\\", "/")
@@ -198,27 +210,130 @@ def rename_note(rel_path, new_title):
     return new_rel
 
 
-def delete_note(rel_path):
-    """删除笔记文件，返回是否成功"""
-    full = os.path.join(DATA_DIR, f"{rel_path}.md")
-    if os.path.exists(full):
-        os.remove(full)
-        global NOTE_NAME_MAP
-        NOTE_NAME_MAP = None
+def move_to_trash(rel_path, is_dir=False):
+    """
+    把笔记或文件夹移入回收站（data/.trash/<时间戳>/），保留原相对路径结构，
+    便于整体恢复。同一秒内的多次删除会归入同一批次。
+
+    返回回收站内的相对路径；源不存在或移动失败返回 None。
+    """
+    rel_path = rel_path.replace("\\", "/").strip("/")
+    src = os.path.join(DATA_DIR, rel_path.replace("/", os.sep))
+    if not is_dir:
+        src += ".md"
+    if not os.path.exists(src):
+        return None
+
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    dest = os.path.join(TRASH_DIR, stamp, rel_path.replace("/", os.sep))
+    if not is_dir:
+        dest += ".md"
+    try:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        shutil.move(src, dest)
+    except (OSError, shutil.Error):
+        return None
+
+    global NOTE_NAME_MAP
+    NOTE_NAME_MAP = None
+    return os.path.relpath(dest, TRASH_DIR).replace("\\", "/")
+
+
+def list_trash(sort_desc=True):
+    """
+    列出回收站内容：[(时间戳, [顶层条目名, ...]), ...]。
+    sort_desc=True 按删除时间倒序（新 → 旧），False 为正序。
+    条目名即删除时的文件/文件夹名。
+    """
+    if not os.path.isdir(TRASH_DIR):
+        return []
+    result = []
+    for stamp in sorted(os.listdir(TRASH_DIR), reverse=sort_desc):
+        batch = os.path.join(TRASH_DIR, stamp)
+        if not os.path.isdir(batch):
+            continue
+        entries = sorted(e for e in os.listdir(batch) if not _is_hidden(e))
+        result.append((stamp, entries))
+    return result
+
+
+def restore_from_trash(stamp, entry):
+    """
+    从回收站恢复一个条目到原位置（目标已存在时自动改名，不覆盖）。
+    stamp: 批次时间戳；entry: 条目名（如 "test1.md" 或 "myfolder"）
+    返回恢复后的目标名，失败返回 None。
+    """
+    src = os.path.join(TRASH_DIR, stamp, entry)
+    if not os.path.exists(src):
+        return None
+
+    dest = os.path.join(DATA_DIR, entry)
+    if os.path.exists(dest):
+        base, ext = os.path.splitext(entry)
+        i = 1
+        while os.path.exists(os.path.join(DATA_DIR, f"{base}_restored{i}{ext}")):
+            i += 1
+        dest = os.path.join(DATA_DIR, f"{base}_restored{i}{ext}")
+
+    try:
+        shutil.move(src, dest)
+    except (OSError, shutil.Error):
+        return None
+
+    global NOTE_NAME_MAP
+    NOTE_NAME_MAP = None
+    _cleanup_empty_batch(stamp)
+    return os.path.basename(dest)
+
+
+def delete_trash_entry(stamp, entry):
+    """
+    从回收站彻底删除一个条目（文件或文件夹）。
+    返回是否成功；批次目录清空后一并移除。
+    """
+    target = os.path.join(TRASH_DIR, stamp, entry)
+    if not os.path.exists(target):
+        return False
+    try:
+        if os.path.isdir(target):
+            shutil.rmtree(target)
+        else:
+            os.remove(target)
+    except (OSError, shutil.Error):
+        return False
+    _cleanup_empty_batch(stamp)
+    return True
+
+
+def _cleanup_empty_batch(stamp):
+    """批次目录已空则删除"""
+    batch = os.path.join(TRASH_DIR, stamp)
+    try:
+        if os.path.isdir(batch) and not os.listdir(batch):
+            os.rmdir(batch)
+    except OSError:
+        pass
+
+
+def empty_trash():
+    """清空回收站，返回是否成功"""
+    if not os.path.isdir(TRASH_DIR):
         return True
-    return False
+    try:
+        shutil.rmtree(TRASH_DIR)
+        return True
+    except (OSError, shutil.Error):
+        return False
+
+
+def delete_note(rel_path):
+    """删除笔记 → 移入回收站（可恢复），返回是否成功"""
+    return move_to_trash(rel_path, is_dir=False) is not None
 
 
 def delete_folder(rel_path):
-    """删除文件夹及其所有内容，返回是否成功"""
-    full = os.path.join(DATA_DIR, rel_path)
-    if os.path.exists(full) and os.path.isdir(full):
-        import shutil
-        shutil.rmtree(full)
-        global NOTE_NAME_MAP
-        NOTE_NAME_MAP = None
-        return True
-    return False
+    """删除文件夹及其内容 → 移入回收站（可恢复），返回是否成功"""
+    return move_to_trash(rel_path, is_dir=True) is not None
 
 
 def rename_folder(rel_path, new_name):
@@ -254,6 +369,53 @@ def make_subdir(parent_rel, dir_name):
     return safe_name
 
 
+def move_item(rel_path, target_dir, is_dir=False):
+    """
+    把笔记或文件夹移动到 data/ 下的另一个目录。
+
+    target_dir: 目标目录的相对路径，"" 表示 data 根目录
+    返回新的相对路径（不含 .md）；以下情况返回 None：
+      - 源不存在 / 目标目录不在 data 下
+      - 目标已存在同名项
+      - 移动到原目录（无需移动）
+      - 文件夹被移入自身或自身的子目录
+    """
+    rel_path = (rel_path or "").replace("\\", "/").strip("/")
+    target_dir = (target_dir or "").replace("\\", "/").strip("/")
+
+    src = os.path.join(DATA_DIR, rel_path.replace("/", os.sep))
+    if not is_dir:
+        src += ".md"
+    if not rel_path or not os.path.exists(src):
+        return None
+
+    name = rel_path.rsplit("/", 1)[-1]
+    parent = rel_path.rsplit("/", 1)[0] if "/" in rel_path else ""
+    if parent == target_dir:
+        return None  # 已在目标目录
+    if is_dir and (target_dir == rel_path
+                   or target_dir.startswith(rel_path + "/")):
+        return None  # 不能移入自身或其子目录
+
+    dest_dir = (os.path.join(DATA_DIR, target_dir.replace("/", os.sep))
+                if target_dir else DATA_DIR)
+    if not os.path.isdir(dest_dir):
+        return None
+
+    dest = os.path.join(dest_dir, name + ("" if is_dir else ".md"))
+    if os.path.exists(dest):
+        return None  # 重名
+
+    try:
+        shutil.move(src, dest)
+    except (OSError, shutil.Error):
+        return None
+
+    global NOTE_NAME_MAP
+    NOTE_NAME_MAP = None
+    return f"{target_dir}/{name}" if target_dir else name
+
+
 def _build_tree(base_dir, prefix=""):
     """递归构建树结构"""
     items = []
@@ -263,6 +425,8 @@ def _build_tree(base_dir, prefix=""):
         entries = sorted(os.listdir(base_dir))
     except PermissionError:
         return items
+    # 跳过回收站等内部目录
+    entries = [e for e in entries if not _is_hidden(e)]
     # 文件夹排前，文件排后，各自按字母序
     dirs = [e for e in entries if os.path.isdir(os.path.join(base_dir, e))]
     files = [e for e in entries if not os.path.isdir(os.path.join(base_dir, e))]

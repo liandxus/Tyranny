@@ -75,6 +75,23 @@ def files_icon(color: str = "#888888") -> ImageTk.PhotoImage:
     return _photo(img)
 
 
+def trash_icon(color: str = "#888888") -> ImageTk.PhotoImage:
+    """垃圾桶图标（应用内回收站）"""
+    img, draw = _make_image()
+
+    # 提手
+    draw.rectangle([9, 2, 15, 4], fill=color)
+    # 盖子
+    draw.rectangle([4, 5, 20, 7], fill=color)
+    # 桶身（竖直矩形）
+    draw.rectangle([6, 8, 18, 21], fill=color)
+    # 桶身竖纹
+    for x in (10, 12, 14):
+        draw.line([(x, 10), (x, 19)], fill=_dim(color, 0.55), width=1)
+
+    return _photo(img)
+
+
 def sun_icon(color: str = "#888888") -> ImageTk.PhotoImage:
     """太阳图标（实心圆 + 八方向短光芒线）"""
     img, draw = _make_image()

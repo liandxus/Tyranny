@@ -129,6 +129,15 @@ class ThemeMixin:
         self.file_tree_frame.configure(bg=c["sidebar_bg"])
         self.tree_container.configure(bg=c["sidebar_bg"], highlightbackground=c["sidebar_bg"])
         self.tag_frame.configure(bg=c["sidebar_bg"])
+        # 回收站面板
+        self.trash_frame.configure(bg=c["sidebar_bg"])
+        self.trash_body.configure(bg=c["sidebar_bg"])
+        self.trash_header.configure(bg=c["sidebar_header_bg"])
+        for w in (self.trash_title, self.trash_sort_btn, self.trash_empty_btn):
+            w.configure(bg=c["sidebar_header_bg"], fg=c["sidebar_header_fg"])
+        for w in (self.trash_sort_btn, self.trash_empty_btn):
+            w._nb_normal_bg = c["sidebar_header_bg"]
+            w._nb_hover_bg = c["sidebar_item_selected"]
         self.side_header.configure(bg=c["sidebar_header_bg"], fg=c["sidebar_header_fg"])
         self._tree_header_frame.configure(bg=c["sidebar_header_bg"])
         # 刷新图标颜色
@@ -163,6 +172,22 @@ class ThemeMixin:
         self.style.map("Treeview",
                        background=[("selected", c["tree_sel_bg"])],
                        foreground=[("selected", c["tree_sel_fg"])])
+
+        # 表头（回收站列表与 Markdown 表格共用，需单独配置才会跟随主题）
+        self.style.configure(
+            "Treeview.Heading",
+            background=c["sidebar_header_bg"],
+            foreground=c["sidebar_header_fg"],
+            lightcolor=c["sidebar_header_bg"],
+            darkcolor=c["sidebar_header_bg"],
+            relief=tk.FLAT, borderwidth=0,
+            font=("Microsoft YaHei", 9),
+        )
+        self.style.map(
+            "Treeview.Heading",
+            background=[("active", c["tree_hover_bg"])],
+            foreground=[("active", c["sidebar_header_fg"])],
+        )
 
         # 文件树行悬停高亮
         self.tree.tag_configure('hover', background=c["tree_hover_bg"])

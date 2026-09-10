@@ -482,7 +482,9 @@ class _MarkdownHTMLRenderer(HTMLParser):
             background=[("selected", sel_bg)],
             foreground=[("selected", sel_fg)])
 
-        hn = f"table_head_{id(tree)}.Treeview.Heading"
+        # 表头样式名必须与表格样式同源（X.Treeview → X.Treeview.Heading），
+        # 否则 Tk 不会将其应用到该表格
+        hn = f"table_{id(tree)}.Treeview.Heading"
         style.configure(hn,
             background=head_bg, foreground=head_fg,
             font=("Microsoft YaHei", fs, "bold"),

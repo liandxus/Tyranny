@@ -30,11 +30,12 @@ from ui.shell import ShellMixin
 from ui.tag_panel import TagPanelMixin
 from ui.theme import ThemeMixin
 from ui.titlebar import TitleBarMixin
+from ui.trash_panel import TrashPanelMixin
 
 
 class IndeXarApp(TitleBarMixin, FileTreeMixin, TagPanelMixin,
                  ContentViewMixin, SearchMixin, DialogsMixin,
-                 ThemeMixin, ShellMixin):
+                 ThemeMixin, ShellMixin, TrashPanelMixin):
     """IndeXar 主应用（无边框+自定义标题栏）"""
 
     ICONS = {"light": {"sun": "☀️", "moon": "🌙"},
@@ -87,6 +88,9 @@ class IndeXarApp(TitleBarMixin, FileTreeMixin, TagPanelMixin,
         self._file_tags_height = 88
         # 标签交集状态：(标签名列表, 文件列表)；None 表示当前无交集
         self._tag_intersection = None
+
+        # 回收站排序方向：True = 按删除时间倒序（新 → 旧）
+        self._trash_sort_desc = True
 
         # 外部编辑器路径
         self._editor_path = "notepad.exe"
@@ -162,6 +166,7 @@ class IndeXarApp(TitleBarMixin, FileTreeMixin, TagPanelMixin,
         self.side_frame.grid_columnconfigure(0, weight=1)
         self._build_file_tree_panel()
         self._build_tag_panel()
+        self._build_trash_panel()
 
         # ── 可拖动分隔条（col=2, sticky="ns", w=4）──
         self._grip = tk.Frame(self.body, width=4, cursor="sb_h_double_arrow")
