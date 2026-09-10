@@ -2,13 +2,23 @@ import os
 import re
 import json
 import shutil
+import sys
 import time
 import frontmatter
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
-INDEX_FILE = os.path.join(os.path.dirname(__file__), "index.json")
+# 打包（PyInstaller）后用户数据应跟随 exe 所在目录，而非临时解压目录
+if getattr(sys, "frozen", False):
+    APP_ROOT = os.path.dirname(sys.executable)
+else:
+    APP_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+DATA_DIR = os.path.join(APP_ROOT, "data")
+INDEX_FILE = os.path.join(APP_ROOT, "index.json")
 # 回收站目录（以 . 开头，不参与笔记枚举与文件树展示）
 TRASH_DIR = os.path.join(DATA_DIR, ".trash")
+
+# 首次运行（打包后 data/ 不随 exe 分发）时自动创建
+os.makedirs(DATA_DIR, exist_ok=True)
 
 
 def list_notes():

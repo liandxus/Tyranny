@@ -65,7 +65,6 @@ IndeXar 是一个基于 Python 的桌面端个人知识档案库应用，专注�
 - 可视化修改 `title`（目前仅支持编辑 `tags`）
 - 模糊搜索（`fuzzywuzzy`）
 - 内存索引加速搜索
-- 桌面打包（PyInstaller → `.exe`）
 
 ---
 
@@ -292,6 +291,23 @@ tags: [标签1, 标签2]
         ↓
 清空搜索框 → 自动恢复文件树
 ```
+
+---
+
+## 打包分发
+
+使用 PyInstaller 打包为 Windows 桌面程序：
+
+```text
+python -m PyInstaller IndeXar.spec --noconfirm
+```
+
+- 产物在 `dist/IndeXar/`，入口为 `IndeXar.exe`（onedir 模式）
+- 应用图标与任务栏图标：`assets/app.ico`（深藏青圆底 + 白色图案，由
+  `archive/assets` 的多尺寸 PNG 合成；32px 版本 `assets/app_32.png` 供窗口图标使用）
+- 用户数据（`data/`、`settings.json`、`index.json`）跟随 exe 目录存放，
+  首次运行自动创建 `data/`；升级时保留 exe 旁的这些文件即可
+- 程序资源 `assets/` 打包进 `dist/IndeXar/_internal/`
 
 ---
 

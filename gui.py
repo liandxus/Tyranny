@@ -21,8 +21,8 @@ from context_menu import ContextMenu
 import config
 from config import SETTINGS_FILE  # 路径由 config 模块统一持有
 
-from ui.common import (SEARCH_HIT_COLOR, SEARCH_HIT_ALPHA, _add_hover_bg,
-                       _blend_hex, _readable_fg)
+from ui.common import (SEARCH_HIT_COLOR, SEARCH_HIT_ALPHA, ASSETS_DIR,
+                       _add_hover_bg, _blend_hex, _readable_fg)
 from ui.content_view import ContentViewMixin
 from ui.dialogs import DialogsMixin
 from ui.file_tree import FileTreeMixin
@@ -118,6 +118,15 @@ class IndeXarApp(TitleBarMixin, FileTreeMixin, TagPanelMixin,
 
         self.colors = VSCodeTheme.get(self.theme_mode)
         self._apply_theme()
+
+        # 窗口/任务栏图标（overrideredirect 窗口经 _fix_alt_tab 进入任务栏后
+        # 显示的就是这里的图标；固定用深底版本，不随主题切换）
+        try:
+            icon_path = os.path.join(ASSETS_DIR, "app_32.png")
+            if os.path.exists(icon_path):
+                self.root.iconphoto(True, tk.PhotoImage(file=icon_path))
+        except Exception:
+            pass
 
         # 强制刷新布局，确保折叠状态等设置生效
         self.root.update_idletasks()

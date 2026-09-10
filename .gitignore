@@ -8,3 +8,7 @@ settings.json
 
 # 应用内回收站（删除的笔记暂存于此，不应纳入版本控制）
 data/.trash/
+
+# 鎵撳寘浜х墿
+build/
+dist/

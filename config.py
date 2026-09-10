@@ -7,10 +7,16 @@ IndeXar 配置管理模块
 
 import json
 import os
+import sys
 
-# 配置文件路径（项目根目录下）
-SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                             "settings.json")
+# 打包后配置文件应跟随 exe 所在目录，而非临时解压目录
+if getattr(sys, "frozen", False):
+    APP_ROOT = os.path.dirname(sys.executable)
+else:
+    APP_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+# 配置文件路径（应用根目录下）
+SETTINGS_FILE = os.path.join(APP_ROOT, "settings.json")
 
 # 默认配置：文件缺失或字段缺失时使用
 DEFAULTS = {
