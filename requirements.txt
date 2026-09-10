@@ -3,3 +3,4 @@
 Markdown>=3.4
 python-frontmatter>=1.0
 Pillow>=10.0
+svg.path>=6.0
