@@ -78,6 +78,9 @@ class IndeXarApp(TitleBarMixin, FileTreeMixin, TagPanelMixin,
         self._font_size = 11
         self._font_step = 1
 
+        # 图片显示方式："fit" 适应宽度 / "original" 原始尺寸
+        self._image_mode = "fit"
+
         # 跟随系统主题
         self._follow_system_theme = False
         self._theme_overridden = False
@@ -216,6 +219,7 @@ class IndeXarApp(TitleBarMixin, FileTreeMixin, TagPanelMixin,
                 if ctr:
                     ctr.configure(height=self._file_tags_height)
         self._editor_path = s["editor_path"]
+        self._image_mode = s["image_mode"]
 
     def _save_settings(self):
         """将当前配置写入 settings.json（写入与兜底由 config 负责）"""
@@ -227,6 +231,7 @@ class IndeXarApp(TitleBarMixin, FileTreeMixin, TagPanelMixin,
             "file_tags_collapsed": self._file_tags_collapsed,
             "file_tags_height": self._file_tags_height,
             "editor_path": self._editor_path,
+            "image_mode": self._image_mode,
         })
 
     # ══════════════════════════════════

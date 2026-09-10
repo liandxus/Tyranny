@@ -218,8 +218,19 @@ class ContentViewMixin:
         self.text_container = tk.Frame(self.content_body)
         self.text_container.pack(fill=tk.BOTH, expand=True)
 
+        # 垂直滚动条固定在右侧
+        self.content_scroll = ttk.Scrollbar(
+            self.text_container, orient=tk.VERTICAL,
+        )
+        self.content_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # 文本与水平滚动条的容器（让水平条只占文本宽度，
+        # 不延伸到垂直滚动条下方）
+        self.text_area = tk.Frame(self.text_container)
+        self.text_area.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
         self.content_text = tk.Text(
-            self.text_container,
+            self.text_area,
             wrap=tk.WORD,
             font=("Microsoft YaHei", 11),
             padx=20, pady=16,
@@ -227,18 +238,61 @@ class ContentViewMixin:
             borderwidth=0, insertwidth=2,
             cursor="",  # 只读内容区默认箭头，链接处才变手型
         )
-        self.content_scroll = ttk.Scrollbar(
-            self.text_container, orient=tk.VERTICAL,
-        )
-        self.content_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.content_text.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        self.content_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # 水平滚动条：仅当内容（表格/图片）超出可视宽度时显示
+        self.content_hscroll = ttk.Scrollbar(
+            self.text_area, orient=tk.HORIZONTAL)
+
         self.content_scroll.configure(command=self.content_text.yview)
         self.content_text.configure(yscrollcommand=self.content_scroll.set)
+        self.content_hscroll.configure(command=self.content_text.xview)
+        self.content_text.configure(xscrollcommand=self.content_hscroll.set)
         self.content_text.configure(state=tk.DISABLED)
+
+        # 滚轮：按像素滚动。Text 默认按「行」滚动，而图片所在行的高度
+        # 等于图片高度，滚一格会直接跳过整张图，观感像“突然加速”
+        self._wheel_accum = 0
+        self.content_text.bind("<MouseWheel>", self._on_content_wheel)
+        self.content_text.bind("<Button-4>", self._on_content_wheel_up)
+        self.content_text.bind("<Button-5>", self._on_content_wheel_down)
+
+        # 尺寸变化时同步水平滚动条显隐
+        self.content_text.bind("<Configure>",
+                               lambda e: self._sync_hscroll())
 
         # 内容区右键菜单
         self._build_content_context_menu()
+
+    def _on_content_wheel(self, event):
+        """内容区滚轮：按像素滚动，跨越大图片时不会突然跳跃"""
+        # 高精度滚轮（触控板）单次 delta 可能小于 120，先累加再滚动
+        self._wheel_accum += event.delta
+        steps = int(self._wheel_accum / 120)
+        if steps:
+            self._wheel_accum -= steps * 120
+            self.content_text.yview_scroll(-steps * 60, "pixels")
+        return "break"
+
+    def _on_content_wheel_up(self, event):
+        """Linux 滚轮向上"""
+        self.content_text.yview_scroll(-60, "pixels")
+        return "break"
+
+    def _on_content_wheel_down(self, event):
+        """Linux 滚轮向下"""
+        self.content_text.yview_scroll(60, "pixels")
+        return "break"
+
+    def _sync_hscroll(self):
+        """内容（表格/图片）超出可视宽度时才显示水平滚动条"""
+        try:
+            if self.content_text.xview()[1] < 1.0:
+                self.content_hscroll.pack(side=tk.BOTTOM, fill=tk.X)
+            else:
+                self.content_hscroll.pack_forget()
+        except tk.TclError:
+            pass
 
     # ── 内容区右键菜单 ──
 
@@ -291,13 +345,35 @@ class ContentViewMixin:
         self.content_text.configure(state=tk.DISABLED)
         self.status_left.configure(text=f"   当前：{rel_path}.md")
         self._refresh_file_tags()
+        # 布局完成后判断内容是否超宽（表格/图片）
+        self.root.after_idle(self._sync_hscroll)
 
     def _render_markdown(self, md_text):
         from markdown_renderer import render_markdown
         self.content_text.configure(state=tk.NORMAL)
+        # 先让控件完成布局，图片「适应宽度」才能按实际宽度计算
+        try:
+            self.content_text.update_idletasks()
+        except tk.TclError:
+            pass
         render_markdown(self.content_text, md_text,
                          link_callback=self._navigate_to_link,
-                         font_size=self._font_size)
+                         font_size=self._font_size,
+                         base_dir=self._current_note_dir(),
+                         image_mode=getattr(self, "_image_mode", "fit"),
+                         hover_callback=self._show_status_hint,
+                         extlink_callback=self._open_external_url)
+
+    def _current_note_dir(self):
+        """当前笔记所在目录的绝对路径（供图片相对路径解析）"""
+        from file_handler import DATA_DIR
+        rel = getattr(self, "_current_note_path", None)
+        if not rel:
+            return DATA_DIR
+        parent = os.path.dirname(rel)
+        if not parent:
+            return DATA_DIR
+        return os.path.join(DATA_DIR, parent.replace("/", os.sep))
 
     def _on_content_click(self, event):
         """内容区点击——内部链接直接跳转；外部链接需 Ctrl+点击"""
@@ -312,18 +388,32 @@ class ContentViewMixin:
                     url = getattr(self.content_text,
                                   "_extlink_map", {}).get(tag)
                     if url:
-                        import webbrowser
-                        webbrowser.open(url)
+                        self._open_external_url(url)
                     return
         except Exception:
             pass
 
-    def _set_extlink_hint(self, url):
-        """进入外部链接时在状态栏显示操作提示"""
+    def _open_external_url(self, url):
+        """用系统默认浏览器打开外部网址"""
+        try:
+            import webbrowser
+            webbrowser.open(url)
+        except Exception:
+            pass
+
+    def _show_status_hint(self, text):
+        """在状态栏显示临时提示；text 为 None 时恢复原文本"""
+        if text is None:
+            self._clear_extlink_hint()
+            return
         if not getattr(self, '_hint_saved_status', False):
             self._hint_saved_status = True
             self._hint_prev_text = self.status_left.cget("text")
-        self.status_left.configure(text=f"   Ctrl+点击 打开：{url}")
+        self.status_left.configure(text=f"   {text}")
+
+    def _set_extlink_hint(self, url):
+        """进入外部链接时在状态栏显示操作提示"""
+        self._show_status_hint(f"Ctrl+点击 打开：{url}")
 
     def _clear_extlink_hint(self):
         """离开外部链接时恢复状态栏"""
@@ -434,6 +524,7 @@ class ContentViewMixin:
         self.content_text.delete(1.0, tk.END)
         self.content_text.insert(tk.END, text)
         self.content_text.configure(state=tk.DISABLED)
+        self.root.after_idle(self._sync_hscroll)
 
     # ══════════════════════════════════
     # 搜索

@@ -45,9 +45,10 @@ class ThemeMixin:
                         self.tree.item(child, open=True)
                     _restore(child)
             _restore()
-            # 重新渲染当前笔记（使用新主题色 + 正确的字号）
-            if self._current_note_path:
-                self._display_note(self._current_note_path)
+
+        # 重新渲染当前笔记（表格/图片等内嵌控件需要按新主题重建）
+        if self._current_note_path:
+            self._display_note(self._current_note_path)
 
     def _update_theme_toggle(self):
         """当前主题亮显，另一个灰显"""
@@ -180,6 +181,7 @@ class ThemeMixin:
             foreground=c["sidebar_header_fg"],
             lightcolor=c["sidebar_header_bg"],
             darkcolor=c["sidebar_header_bg"],
+            bordercolor=c["sidebar_header_bg"],
             relief=tk.FLAT, borderwidth=0,
             font=("Microsoft YaHei", 9),
         )
@@ -187,6 +189,8 @@ class ThemeMixin:
             "Treeview.Heading",
             background=[("active", c["tree_hover_bg"])],
             foreground=[("active", c["sidebar_header_fg"])],
+            lightcolor=[("active", c["tree_hover_bg"])],
+            darkcolor=[("active", c["tree_hover_bg"])],
         )
 
         # 文件树行悬停高亮

@@ -21,6 +21,7 @@ DEFAULTS = {
     "file_tags_collapsed": False,
     "file_tags_height": 88,
     "editor_path": "notepad.exe",
+    "image_mode": "fit",
 }
 
 # 类型校验器：读取时按此转换，转换失败则保留默认值
@@ -32,9 +33,11 @@ _CONVERTERS = {
     "file_tags_collapsed": bool,
     "file_tags_height": int,
     "editor_path": str,
+    "image_mode": str,
 }
 
 _VALID_THEMES = ("light", "dark")
+_VALID_IMAGE_MODES = ("fit", "original")
 
 
 def load():
@@ -64,6 +67,8 @@ def load():
 
     if data["theme_mode"] not in _VALID_THEMES:
         data["theme_mode"] = DEFAULTS["theme_mode"]
+    if data["image_mode"] not in _VALID_IMAGE_MODES:
+        data["image_mode"] = DEFAULTS["image_mode"]
     return data
 
 

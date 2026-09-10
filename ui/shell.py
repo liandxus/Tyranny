@@ -210,13 +210,29 @@ class ShellMixin:
         follow = self._follow_system_theme
         sidebar_visible = self._sidebar_width > 0
         sidebar_text = "隐藏侧栏" if sidebar_visible else "显示侧栏"
+        fit = self._image_mode == "fit"
         return [
             ("字号…", self._open_font_dialog),
             ("切换主题", self._toggle_theme),
+            (f"图片适应宽度  {'✓' if fit else ''}",
+             lambda: self._set_image_mode("fit")),
+            (f"图片原始尺寸  {'✓' if not fit else ''}",
+             lambda: self._set_image_mode("original")),
             (sidebar_text, self._toggle_sidebar),
             None,
             (f"跟随系统主题  {'✓' if follow else ''}", self._toggle_follow_system_theme),
         ]
+
+    def _set_image_mode(self, mode):
+        """设置 Markdown 图片显示方式：fit=适应宽度 / original=原始尺寸"""
+        if mode not in ("fit", "original") or mode == self._image_mode:
+            return
+        self._image_mode = mode
+        self._save_settings()
+        if getattr(self, "_current_note_path", None):
+            self._display_note(self._current_note_path)
+        self.status_left.configure(
+            text="   图片显示: " + ("适应宽度" if mode == "fit" else "原始尺寸"))
 
     def _zoom_in(self):
         """放大字号"""

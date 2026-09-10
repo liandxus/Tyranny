@@ -22,7 +22,7 @@ IndeXar 是一个基于 Python 的桌面端个人知识档案库应用，专注�
 | 语言 | Python 3.11 |
 | 界面 | Tkinter（Python 标准库） |
 | 数据存储 | Markdown 文件 + YAML 元数据 |
-| Markdown 渲染 | `markdown` 库 → HTML → 自研 `HTMLParser` → `tkinter.Text` tag 样式 |
+| Markdown 渲染 | `markdown` 库 → HTML → 自研 `HTMLParser` → `tkinter.Text` tag 样式（表格用 `Treeview`，图片用 `Pillow` 缩放后内嵌） |
 | 元数据解析 | `python-frontmatter` |
 | 搜索 | 遍历匹配（文件名优先 + 内容匹配，含片段摘要与跳转） |
 | 图标 | `Pillow` 绘制，规避系统 emoji 渲染差异 |
@@ -36,7 +36,7 @@ IndeXar 是一个基于 Python 的桌面端个人知识档案库应用，专注�
 | 功能 | 描述 | 优先级 |
 | :--- | :--- | :--- |
 | **文件树** | 左侧面板列出 `data/` 下所有 `.md` 文件，点击加载内容 | P0 |
-| **Markdown 阅览** | 将 Markdown 渲染为格式化内容展示（标题、列表、代码块等） | P0 |
+| **Markdown 阅览** | 将 Markdown 渲染为格式化内容展示（标题、列表、代码块、表格、图片等） | P0 |
 | **全文搜索** | 输入关键词，在所有笔记内容中匹配，返回文件名列表 | P0 |
 | **内部链接跳转** | 识别 `[[文件名]]` 和 `[文本](./文件.md)`，点击跳转到对应笔记 | P1 |
 | **切换面板** | 左侧按钮栏切换"文件树"和"标签列表"视图 | P1 |

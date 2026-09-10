@@ -3,6 +3,7 @@ IndeXar Markdown 渲染器
 使用 markdown 库将 Markdown 转为 HTML，再解析 HTML 在 Tkinter Text 控件中渲染
 """
 
+import os
 import re
 from html.parser import HTMLParser
 from html import unescape
@@ -13,7 +14,9 @@ from tkinter import ttk
 import markdown
 
 
-def render_markdown(text_widget, md_text, link_callback=None, font_size=11):
+def render_markdown(text_widget, md_text, link_callback=None, font_size=11,
+                    base_dir=None, image_mode=None,
+                    hover_callback=None, extlink_callback=None):
     """
     在 Tkinter Text 控件中渲染 Markdown 文本。
 
@@ -22,8 +25,20 @@ def render_markdown(text_widget, md_text, link_callback=None, font_size=11):
         md_text:     Markdown 原始文本
         link_callback: 点击 [[内部链接]] 时的回调，接受目标笔记名参数
         font_size:   基础字号
+        base_dir:    当前笔记所在目录（绝对路径），用于解析图片相对路径
+        image_mode:  "fit" 适应宽度（默认） / "original" 原始尺寸
+        hover_callback:    鼠标悬浮提示回调，参数为提示文本；传 None 表示清除
+        extlink_callback:  Ctrl+点击外部链接时的回调，接受 URL
     """
     text_widget.delete(1.0, "end")
+
+    # 图片渲染上下文：基准目录、显示模式、PhotoImage 引用（防止被 GC 回收）
+    text_widget._base_dir = base_dir
+    if image_mode in ("fit", "original"):
+        text_widget._image_mode = image_mode
+    text_widget._md_images = []
+    text_widget._hover_cb = hover_callback
+    text_widget._extlink_cb = extlink_callback
 
     # 清理上一次渲染留下的动态链接标签，防止颜色残留
     _cleanup_dynamic_tags(text_widget)
@@ -63,6 +78,26 @@ def render_markdown(text_widget, md_text, link_callback=None, font_size=11):
 # 内部链接预处理
 # ══════════════════════════════════
 
+def _looks_like_note_target(href):
+    """判断非协议链接是否指向站内笔记：结尾为 .md，或整段没有扩展名"""
+    h = (href or "").split("#")[0].split("?")[0].strip()
+    if not h or h.startswith(("#", "mailto:", "javascript:", "data:")):
+        return False
+    tail = h.replace("\\", "/").rstrip("/").split("/")[-1]
+    if not tail:
+        return False
+    if "." not in tail:
+        return True
+    return tail.lower().endswith(".md")
+
+
+def _note_name_from_href(href):
+    """从链接地址中取出笔记名：./a/b.md → b"""
+    h = (href or "").split("#")[0].split("?")[0]
+    tail = h.replace("\\", "/").rstrip("/").split("/")[-1]
+    return re.sub(r"\.md$", "", tail, flags=re.I)
+
+
 def _preprocess_wikilinks(text):
     """将 [[target]] 和 [[target|display]] 转为标准 Markdown 链接，
        使用 wikilink: 协议前缀标记内部链接，供后续渲染时识别。"""
@@ -99,6 +134,9 @@ class _MarkdownHTMLRenderer(HTMLParser):
         # ── 列表状态 ──
         self._list_depth = 0      # 嵌套深度
         self._ol_counters = []    # 每层有序列表计数器
+
+        # ── 链接状态 ──
+        self._anchor_title = ""     # 当前 <a> 的 title，供图片悬浮提示使用
 
         # ── 表格状态 ──
         self._in_table = False
@@ -152,11 +190,15 @@ class _MarkdownHTMLRenderer(HTMLParser):
             self._stack.append('strikethrough')
         elif tag == 'a':
             href = a.get('href', '')
+            self._anchor_title = a.get('title', '')
             if href.startswith('wikilink:'):
-                target = href[9:]
-                self._stack.append(('wikilink', target))
+                self._stack.append(('wikilink', href[9:]))
             elif href.startswith(('http://', 'https://')):
                 self._stack.append(('extlink', href))
+            elif _looks_like_note_target(href):
+                # 非协议链接：形如 [文字](笔记名) 或 [文字](./笔记.md)，
+                # 与 [[笔记名]] 走同一套跳转逻辑
+                self._stack.append(('wikilink', _note_name_from_href(href)))
 
         # ── 块级元素 ──（先清栈确保无残留 tag）
         elif tag in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
@@ -165,6 +207,9 @@ class _MarkdownHTMLRenderer(HTMLParser):
             self._stack.append(f'heading{level}')
         elif tag == 'blockquote':
             self._stack.append('quote')
+        elif tag == 'img':
+            self._insert_image(a.get('src', ''), a.get('alt', ''),
+                               a.get('title', ''))
         elif tag == 'hr':
             self.w.insert('end', '─' * 40 + '\n', 'hr')
 
@@ -280,9 +325,9 @@ class _MarkdownHTMLRenderer(HTMLParser):
 
     # ── 辅助函数 ──
 
-    def _insert(self, text):
+    def _insert(self, text, extra_tags=()):
         """向 Text 控件插入文本，应用当前样式栈中所有标签"""
-        tags = []
+        tags = list(extra_tags)
         for s in self._stack:
             if isinstance(s, tuple) and s[0] == 'wikilink':
                 tag_name = f'wikilink_{s[1]}'
@@ -314,6 +359,189 @@ class _MarkdownHTMLRenderer(HTMLParser):
         else:
             self.w.insert('end', text)
 
+    # ── 图片 ──
+
+    def _insert_image(self, src, alt, title=""):
+        """插入图片：按 _image_mode 决定「适应宽度」或「原始尺寸」"""
+        path = self._resolve_image_path(src)
+        if not path:
+            self._insert(f"[图片：{alt or src}]",
+                         extra_tags=("img_placeholder",))
+            self._insert("\n")
+            return
+        try:
+            from PIL import Image, ImageTk
+        except ImportError:
+            self._insert(f"[图片：{alt or src}]",
+                         extra_tags=("img_placeholder",))
+            self._insert("\n")
+            return
+
+        try:
+            img = Image.open(path)
+            img.load()
+        except Exception:
+            self._insert(f"[图片无法读取：{alt or src}]",
+                         extra_tags=("img_placeholder",))
+            self._insert("\n")
+            return
+
+        w, h = img.size
+        target = w
+        if getattr(self.w, "_image_mode", "fit") != "original":
+            avail = self._available_width()
+            if w > avail:
+                target = avail
+        if w > 0 and target != w:
+            ratio = target / float(w)
+            resample = getattr(Image, "Resampling", Image).LANCZOS
+            try:
+                img = img.convert("RGBA").resize(
+                    (max(1, target), max(1, int(h * ratio))), resample)
+            except Exception:
+                pass
+
+        try:
+            photo = ImageTk.PhotoImage(img)
+        except Exception:
+            self._insert(f"[图片无法显示：{alt or src}]",
+                         extra_tags=("img_placeholder",))
+            self._insert("\n")
+            return
+
+        # 保持引用，防止 PhotoImage 被回收导致图片空白
+        if not hasattr(self.w, "_md_images"):
+            self.w._md_images = []
+        self.w._md_images.append(photo)
+
+        anchor = self._current_anchor()
+        hint = self._image_hint(title or self._anchor_title, alt, anchor)
+
+        # 用 Label 承载图片：Text 的嵌入图片无法接收鼠标事件，
+        # 换成窗口部件后才能支持悬浮提示与点击跳转
+        try:
+            text_bg = self.w.cget("bg")
+        except tk.TclError:
+            text_bg = "#ffffff"
+        holder = tk.Label(self.w, image=photo, bg=text_bg,
+                          bd=0, highlightthickness=0, padx=0, pady=0)
+        if anchor:
+            holder.configure(cursor="hand2")
+        hover_cb = getattr(self.w, "_hover_cb", None)
+        if hint and hover_cb:
+            holder.bind("<Enter>", lambda e, t=hint: hover_cb(t))
+            holder.bind("<Leave>", lambda e: hover_cb(None))
+        if anchor:
+            holder.bind("<Button-1>",
+                        lambda e, a=anchor: self._activate_anchor(e, a))
+        # 图片会截获滚轮事件，需转发给 Text，否则鼠标停在图上无法滚动
+        self._bind_wheel_to_text(holder)
+
+        try:
+            self.w.window_create("end", window=holder, pady=6, align="center")
+        except tk.TclError:
+            return
+        self._insert("\n")
+
+    def _bind_wheel_to_text(self, widget):
+        """把嵌入控件（图片/表格）的滚轮事件转发给 Text，
+        由内容区统一处理，避免各处滚动步长不一致"""
+        def _wheel(e):
+            self.w.event_generate("<MouseWheel>", delta=e.delta, x=1, y=1)
+            return "break"
+
+        def _up(e):
+            self.w.event_generate("<Button-4>", x=1, y=1)
+            return "break"
+
+        def _down(e):
+            self.w.event_generate("<Button-5>", x=1, y=1)
+            return "break"
+
+        widget.bind("<MouseWheel>", _wheel)
+        widget.bind("<Button-4>", _up)      # Linux 向上
+        widget.bind("<Button-5>", _down)    # Linux 向下
+
+    def _current_anchor(self):
+        """当前图片所处的链接：('wikilink', 笔记名) / ('extlink', url) / None"""
+        for s in reversed(self._stack):
+            if isinstance(s, tuple) and s[0] in ('wikilink', 'extlink'):
+                return s
+        return None
+
+    def _image_hint(self, title, alt, anchor):
+        """组装图片的悬浮提示文本，无内容时返回 None"""
+        parts = []
+        label = title or alt
+        if label:
+            parts.append(label)
+        if anchor:
+            kind, target = anchor
+            if kind == 'extlink':
+                parts.append(f"Ctrl+点击 打开：{target}")
+            else:
+                parts.append(f"点击跳转：{target}")
+        return "　".join(parts) if parts else None
+
+    def _activate_anchor(self, event, anchor):
+        """点击带链接的图片：内部链接直接跳转，外部链接需 Ctrl+点击"""
+        kind, target = anchor
+        if kind == 'wikilink':
+            if self.link_cb:
+                self.link_cb(target)
+        elif bool(event.state & 0x4):       # Ctrl 按下
+            cb = getattr(self.w, "_extlink_cb", None)
+            if cb:
+                cb(target)
+
+    def _resolve_image_path(self, src):
+        """把 Markdown 中的图片地址解析为本地绝对路径，找不到返回 None"""
+        if not src:
+            return None
+        src = unescape(src).strip().strip("\"'")
+        # 网络图片不加载
+        if not src or src.startswith(("http://", "https://",
+                                     "data:", "ftp://")):
+            return None
+        # 去掉锚点与查询串
+        for sep in ("#", "?"):
+            if sep in src:
+                src = src.split(sep)[0]
+        if not src:
+            return None
+        raw = src.replace("\\", "/")
+        rel = os.path.normpath(raw.lstrip("/")).replace("\\", os.sep)
+
+        candidates = []
+        base = getattr(self.w, "_base_dir", None)
+        if base:
+            candidates.append(os.path.join(base, rel))
+        from file_handler import DATA_DIR
+        candidates.append(os.path.join(DATA_DIR, rel))
+        if os.path.isabs(src):
+            candidates.append(src)
+        for path in candidates:
+            try:
+                if os.path.isfile(path):
+                    return path
+            except OSError:
+                continue
+        return None
+
+    def _available_width(self):
+        """Text 控件可用于图片的像素宽度（扣除内边距）"""
+        try:
+            width = self.w.winfo_width()
+        except tk.TclError:
+            width = 0
+        if width <= 1:          # 尚未完成布局，用近似值兜底
+            return 720
+        try:
+            pad = int(self.w.cget("padx")) * 2
+        except (tk.TclError, ValueError):
+            pad = 40
+        return max(120, width - pad - 8)
+
     def _pop_str(self, name):
         """从样式栈中移除指定名称的样式（最近一个）"""
         for i in range(len(self._stack) - 1, -1, -1):
@@ -328,6 +556,7 @@ class _MarkdownHTMLRenderer(HTMLParser):
             if (isinstance(s, tuple)
                     and s[0] in ('wikilink', 'extlink')):
                 self._stack.pop(i)
+                self._anchor_title = ""
                 return
 
     def _render_table(self):
@@ -441,13 +670,8 @@ class _MarkdownHTMLRenderer(HTMLParser):
 
         self._theme_treeview(tree)
 
-        # 滚轮转发
-        def _fw(e):
-            self.w.yview_scroll(int(-1 * (e.delta / 120)), "units")
-            return "break"
-        tree.bind("<MouseWheel>", _fw)
-        tree.bind("<Button-4>", lambda e: self.w.yview_scroll(-1, "units"))
-        tree.bind("<Button-5>", lambda e: self.w.yview_scroll(1, "units"))
+        # 滚轮转发（与图片一致，交由内容区统一处理）
+        self._bind_wheel_to_text(tree)
 
         self.w.insert("end", "\n")
         self.w.window_create("end", window=tree)
@@ -477,6 +701,7 @@ class _MarkdownHTMLRenderer(HTMLParser):
         style.configure(sn,
             background=text_bg, foreground=text_fg,
             fieldbackground=text_bg, borderwidth=0,
+            lightcolor=text_bg, darkcolor=text_bg, bordercolor=text_bg,
             font=("Microsoft YaHei", fs), rowheight=28)
         style.map(sn,
             background=[("selected", sel_bg)],
@@ -485,11 +710,17 @@ class _MarkdownHTMLRenderer(HTMLParser):
         # 表头样式名必须与表格样式同源（X.Treeview → X.Treeview.Heading），
         # 否则 Tk 不会将其应用到该表格
         hn = f"table_{id(tree)}.Treeview.Heading"
+        # clam 主题下表头立体边框由 lightcolor/darkcolor 绘制，
+        # 只设 background 会让深色主题下仍残留浅色边框
         style.configure(hn,
             background=head_bg, foreground=head_fg,
+            lightcolor=head_bg, darkcolor=head_bg, bordercolor=head_bg,
             font=("Microsoft YaHei", fs, "bold"),
             relief="flat", borderwidth=0, padding=(8, 4))
-        style.map(hn, background=[("active", head_bg)])
+        style.map(hn,
+            background=[("active", head_bg)],
+            lightcolor=[("active", head_bg)],
+            darkcolor=[("active", head_bg)])
         tree.configure(style=sn)
 
 
@@ -602,3 +833,9 @@ def _configure_tags_with_size(text_widget, base_size=11):
     text_widget.tag_configure("strikethrough",
         font=("Microsoft YaHei", base_size, "overstrike"),
         foreground=fg)
+
+    # 图片占位提示（图片缺失或无法读取时显示）
+    text_widget.tag_configure("img_placeholder",
+        font=("Microsoft YaHei", max(9, base_size - 1), "italic"),
+        foreground="#888888" if dark else "#999999",
+        lmargin1=4, lmargin2=4)
