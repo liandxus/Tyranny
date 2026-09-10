@@ -1,7 +1,7 @@
 ---
 title: test
 date: 2026-06-15
-tags: [测试, 入门, 测试2]
+tags: [测试, 入门, 测试1]
 ---
 
 # test
