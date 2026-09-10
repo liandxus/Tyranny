@@ -9,13 +9,48 @@ import ctypes
 import json
 import os
 import re
-from file_handler import list_notes, list_notes_tree, read_note, get_tag_index, build_tag_index, build_backlink_index
+from file_handler import (list_notes, list_notes_tree, read_note, get_tag_index,
+                          build_tag_index, build_backlink_index, intersect_tags)
 from theme_manager import VSCodeTheme
 from editor_detect import detect_editors
+import search_engine
 import icon_renderer
 from context_menu import ContextMenu
 
-SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "settings.json")
+import config
+from config import SETTINGS_FILE  # 路径由 config 模块统一持有
+
+# 搜索命中高亮：基色 + 不透明度
+# Tk 的 tag 背景不支持 alpha，故用「基色与内容区背景混色」等效实现，
+# 好处是能自动适配亮/暗主题。alpha 越小越淡，1.0 为纯色。
+SEARCH_HIT_COLOR = "#ffd54a"
+SEARCH_HIT_ALPHA = 0.55
+
+
+def _hex_to_rgb(value):
+    """'#rrggbb' → (r, g, b)，非法值按白色处理"""
+    h = (value or "").lstrip("#")
+    if len(h) != 6:
+        return (255, 255, 255)
+    try:
+        return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return (255, 255, 255)
+
+
+def _blend_hex(fg_hex, bg_hex, alpha):
+    """将前景色按 alpha 叠加到背景色上，等效于半透明效果"""
+    r1, g1, b1 = _hex_to_rgb(fg_hex)
+    r2, g2, b2 = _hex_to_rgb(bg_hex)
+    mix = lambda a, b: int(round(a * alpha + b * (1 - alpha)))
+    return "#%02x%02x%02x" % (mix(r1, r2), mix(g1, g2), mix(b1, b2))
+
+
+def _readable_fg(bg_hex):
+    """按背景亮度选择黑字或白字，保证高亮处文字可读"""
+    r, g, b = _hex_to_rgb(bg_hex)
+    luminance = 0.299 * r + 0.587 * g + 0.114 * b
+    return "#000000" if luminance > 140 else "#ffffff"
 
 
 def _add_hover_bg(widget, normal_bg, hover_bg, debug=False):
@@ -91,6 +126,8 @@ class IndeXarApp:
         self._file_tags_collapsed = False
         self._selected_file_tag = None
         self._file_tags_height = 88
+        # 标签交集状态：(标签名列表, 文件列表)；None 表示当前无交集
+        self._tag_intersection = None
 
         # 外部编辑器路径
         self._editor_path = "notepad.exe"
@@ -1268,10 +1305,9 @@ class IndeXarApp:
         self._header_sep.pack(side=tk.RIGHT)
 
         self.search_var = tk.StringVar()
-        # 搜索框清空时自动恢复文件树
-        self.search_var.trace_add("write", lambda *a: (
-            self._refresh_file_tree() if not self.search_var.get().strip() and self.current_panel == "files" else None
-        ))
+        # 内容变化时：控制清空按钮显隐；清空则恢复文件树
+        self.search_var.trace_add("write",
+                                  lambda *a: self._on_search_var_changed())
         self.search_entry = tk.Entry(
             self._header_right,
             textvariable=self.search_var,
@@ -1282,6 +1318,19 @@ class IndeXarApp:
         )
         self.search_entry.pack(side=tk.LEFT, padx=(0, 4))
         self.search_entry.bind("<Return>", lambda e: self._do_search())
+
+        # 清空按钮：仅在有输入时显示，位于搜索按钮左侧
+        self.search_clear_lbl = tk.Label(
+            self._header_right, text="✕",
+            font=("Microsoft YaHei", 9),
+            cursor="hand2", padx=3,
+        )
+        self.search_clear_lbl.bind("<Button-1>",
+                                   lambda e: self._clear_search())
+        self.search_clear_lbl.bind("<Enter>", lambda e: (
+            self.search_clear_lbl.configure(fg="#e81123")))
+        self.search_clear_lbl.bind("<Leave>", lambda e: (
+            self.search_clear_lbl.configure(fg=self.colors["toolbar_fg"])))
 
         self.search_btn = tk.Button(
             self._header_right, text="搜索",
@@ -1888,6 +1937,8 @@ class IndeXarApp:
             highlightcolor=c["search_border"],
             insertbackground=c["toolbar_fg"],
         )
+        self.search_clear_lbl.configure(
+            bg=c["content_header_bg"], fg=c["toolbar_fg"])
         self.search_btn.configure(
             bg=c["toolbar_btn_bg"], fg=c["toolbar_btn_fg"],
             activebackground=c["toolbar_btn_hover"],
@@ -2641,13 +2692,24 @@ class IndeXarApp:
                 frac = (line - 1) / max(total, 1)
                 self.content_text.yview_moveto(frac)
                 end = f"{pos}+{len(kw)}c"
-                self.content_text.tag_remove(tk.SEL, "1.0", tk.END)
-                self.content_text.tag_add(tk.SEL, pos, end)
+                # 使用自定义 tag 而非 tk.SEL：后者依赖控件焦点，
+                # 失焦时选中高亮不会显示，故用自定义 tag；
+                # 基色按 alpha 与内容区背景混合，等效半透明且自适应主题
+                base_bg = self.content_text.cget("bg")
+                hit_bg = _blend_hex(SEARCH_HIT_COLOR, base_bg,
+                                    SEARCH_HIT_ALPHA)
+                self.content_text.tag_configure(
+                    "search_hit", background=hit_bg,
+                    foreground=_readable_fg(hit_bg))
+                self.content_text.tag_remove("search_hit", "1.0", tk.END)
+                self.content_text.tag_add("search_hit", pos, end)
                 self.content_text.see(pos)
                 self.content_text.configure(state=tk.DISABLED)
                 return
             count += 1
             pos = f"{pos}+1c"
+        # 未命中（索引越界）：清除上一次的高亮，避免残留
+        self.content_text.tag_remove("search_hit", "1.0", tk.END)
         self.content_text.configure(state=tk.DISABLED)
 
     # ══════════════════════════════════
@@ -2726,6 +2788,11 @@ class IndeXarApp:
         sel = self.tag_tree.selection()
         tag_iids = [i for i in sel if i.startswith("tag_")]
 
+        # 点击交集分组或其内部文件时保持交集显示：
+        # 否则选中状态变化会被误判为"标签不足 2 个"，刚算出的交集立刻被清掉
+        if any(i.startswith(("__intersection__", "__intf_")) for i in sel):
+            return
+
         if len(tag_iids) == 0:
             self.tag_intersection_label.configure(text="")
             self._clear_tag_intersection()
@@ -2767,7 +2834,8 @@ class IndeXarApp:
                 pass
 
     def _clear_tag_intersection(self):
-        """移除树中的交集分组节点"""
+        """移除树中的交集分组节点，并清空交集状态"""
+        self._tag_intersection = None
         try:
             if self.tag_tree.exists("__intersection__"):
                 self.tag_tree.delete("__intersection__")
@@ -2775,32 +2843,19 @@ class IndeXarApp:
             pass
 
     def _update_tag_intersection(self, tag_iids):
-        """计算多选标签的文件交集，并在树顶部展示交集文件列表"""
+        """多选标签时在树顶部展示交集文件列表（交集由 file_handler 计算）"""
         self._clear_tag_intersection()
 
-        tag_index = get_tag_index()
-        if not tag_index:
+        tag_names = [iid[4:] for iid in tag_iids]  # 去掉 "tag_" 前缀
+        matched, files = intersect_tags(tag_names)
+
+        if len(matched) < 2:
             self.tag_intersection_label.configure(text="")
             return
 
-        file_sets = []
-        tag_names = []
-        for iid in tag_iids:
-            tag_name = iid[4:]  # strip "tag_" prefix
-            if tag_name in tag_index:
-                file_sets.append(set(tag_index[tag_name]))
-                tag_names.append(tag_name)
-
-        if len(file_sets) < 2:
-            self.tag_intersection_label.configure(text="")
-            return
-
-        intersection = file_sets[0]
-        for fs in file_sets[1:]:
-            intersection = intersection & fs
-
-        count = len(intersection)
-        tag_str = " ∩ ".join(sorted(tag_names))
+        self._tag_intersection = (matched, files)
+        tag_str = " ∩ ".join(matched)
+        count = len(files)
         if count == 0:
             self.tag_intersection_label.configure(
                 text=f"  {tag_str} → 没有共同文件")
@@ -2814,7 +2869,7 @@ class IndeXarApp:
             "", "end", iid="__intersection__", open=True,
             text=f"  {tag_str} ({count})")
         self.tag_tree.item(inter_iid, tags=("tag_",))
-        for idx, fpath in enumerate(sorted(intersection)):
+        for idx, fpath in enumerate(files):
             name = fpath.split("/")[-1]
             fid = f"__intf_{idx}"
             self.tag_tree.insert(inter_iid, "end", iid=fid,
@@ -3019,43 +3074,42 @@ class IndeXarApp:
     # 搜索
     # ══════════════════════════════════
 
+    def _on_search_var_changed(self):
+        """搜索框内容变化：有输入才显示清空按钮；清空则恢复文件树"""
+        try:
+            if self.search_var.get().strip():
+                self.search_clear_lbl.pack(side=tk.LEFT, padx=(0, 2),
+                                           before=self.search_btn)
+            else:
+                self.search_clear_lbl.pack_forget()
+                if self.current_panel == "files":
+                    self._refresh_file_tree()
+        except Exception:
+            pass
+
+    def _clear_search(self):
+        """清空搜索框并恢复文件树，焦点回到输入框"""
+        self.search_var.set("")
+        self.search_entry.focus_set()
+
     def _do_search(self):
         keyword = self.search_var.get().strip()
         keyword_lower = keyword.lower()
         if not keyword:
             return
 
-        from file_handler import list_notes, read_note
-
         if self.current_panel != "files":
             self._show_files()
         for item in self.tree.get_children():
             self.tree.delete(item)
 
-        all_notes = list_notes()
         cur = self._current_note_path
-
-        name_matches = []
-        content_matches = []
-        cur_hit_count = 0
-
-        for rel_path in all_notes:
-            name = rel_path.split("/")[-1].lower()
-            name_hit = keyword_lower in name
-            content = read_note(rel_path) or ""
-            if content.startswith("---"):
-                end = content.find("---", 3)
-                if end != -1:
-                    content = content[end + 3:]
-            content_hit = keyword_lower in content.lower()
-
-            if name_hit:
-                name_matches.append(rel_path)
-            elif content_hit:
-                content_matches.append(rel_path)
-
-            if rel_path == cur and content_hit:
-                cur_hit_count = self._count_matches(keyword_lower)
+        # 全库遍历匹配由 search_engine 负责
+        name_matches, content_matches, cur_content_hit = \
+            search_engine.search_notes(keyword, cur)
+        # 命中数需在已渲染内容中统计，仍由 GUI 处理
+        cur_hit_count = (self._count_matches(keyword_lower)
+                         if (cur and cur_content_hit) else 0)
 
         total = len(name_matches) + len(content_matches)
         if total == 0 and cur_hit_count == 0:
@@ -3207,14 +3261,17 @@ class IndeXarApp:
                 ]),
                 ("搜索", [
                     ("p", "· 在顶部搜索框输入关键词后回车；清空搜索框会自动返回文件树。"),
-                    ("p", "· 结果按「文件名匹配 → 内容匹配」排序，文件名命中的排在前面。"),
-                    ("p", "· 结果列表中的上下文片段可点击，跳转到正文中对应位置。"),
+                    ("p", "· 结果分三组，依次是：当前文件 → 文件名匹配 → 内容匹配。"),
+                    ("p", "· 当前文件会列出每处匹配的上下文片段，点击片段可滚动到"),
+                    ("p", "  正文对应位置并选中该关键词。"),
                     ("p", "· 检索为关键词遍历匹配，不支持模糊匹配与布尔查询。"),
                 ]),
                 ("标签与交集", [
                     ("p", "· 单击标签展开其下的笔记列表，双击笔记名打开。"),
-                    ("p", "· Ctrl / Shift + 点击多个标签，可求同时含这些标签的笔记："),
-                    ("p", "  顶部显示「标签A ∩ 标签B → N 个文件」，双击列表项即可打开。"),
+                    ("p", "· 选中多个标签，即可求同时含这些标签的笔记（交集）："),
+                    ("p", "    Ctrl  + 点击  →  逐个加选或取消，适合不相邻的标签"),
+                    ("p", "    Shift + 点击  →  选中两次点击之间的连续范围"),
+                    ("p", "· 顶部显示「标签A ∩ 标签B → N 个文件」，双击列表项打开笔记。"),
                 ]),
                 ("链接跳转", [
                     ("p", "· 点击正文中的 [[笔记名]] 可跳转到对应笔记。"),
@@ -3918,41 +3975,28 @@ class IndeXarApp:
     # ══════════════════════════════════
 
     def _load_settings(self):
-        """从 settings.json 加载配置，覆盖默认值"""
-        if not os.path.exists(SETTINGS_FILE):
-            return
-        try:
-            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-                s = json.load(f)
-            if "font_size" in s:
-                self._font_size = int(s["font_size"])
-                self.status_right.configure(text=f"字号: {self._font_size}   ")
-            if "theme_mode" in s and s["theme_mode"] in ("light", "dark"):
-                self.theme_mode = s["theme_mode"]
-            if "follow_system_theme" in s:
-                self._follow_system_theme = bool(s["follow_system_theme"])
-            if "sidebar_width" in s:
-                self._sidebar_width = int(s["sidebar_width"])
-                self.side_frame.configure(width=self._sidebar_width)
-            if "file_tags_collapsed" in s:
-                self._file_tags_collapsed = bool(s["file_tags_collapsed"])
-                self._apply_file_tags_visibility()
-            if "file_tags_height" in s:
-                self._file_tags_height = int(s["file_tags_height"])
-                # 折叠状态下不覆盖容器高度（保持 28px）
-                if not self._file_tags_collapsed:
-                    for p in ("file_", "tag_"):
-                        ctr = getattr(self, f"{p}tags_container", None)
-                        if ctr:
-                            ctr.configure(height=self._file_tags_height)
-            if "editor_path" in s:
-                self._editor_path = s["editor_path"]
-        except (json.JSONDecodeError, IOError, ValueError):
-            pass  # 配置文件损坏时使用默认值
+        """从 settings.json 加载配置并应用到界面（读取与校验由 config 负责）"""
+        s = config.load()
+        self._font_size = s["font_size"]
+        self.status_right.configure(text=f"字号: {self._font_size}   ")
+        self.theme_mode = s["theme_mode"]
+        self._follow_system_theme = s["follow_system_theme"]
+        self._sidebar_width = s["sidebar_width"]
+        self.side_frame.configure(width=self._sidebar_width)
+        self._file_tags_collapsed = s["file_tags_collapsed"]
+        self._apply_file_tags_visibility()
+        self._file_tags_height = s["file_tags_height"]
+        # 折叠状态下不覆盖容器高度（保持 28px）
+        if not self._file_tags_collapsed:
+            for p in ("file_", "tag_"):
+                ctr = getattr(self, f"{p}tags_container", None)
+                if ctr:
+                    ctr.configure(height=self._file_tags_height)
+        self._editor_path = s["editor_path"]
 
     def _save_settings(self):
-        """将当前配置写入 settings.json"""
-        s = {
+        """将当前配置写入 settings.json（写入与兜底由 config 负责）"""
+        config.save({
             "font_size": self._font_size,
             "theme_mode": self.theme_mode,
             "follow_system_theme": self._follow_system_theme,
@@ -3960,12 +4004,7 @@ class IndeXarApp:
             "file_tags_collapsed": self._file_tags_collapsed,
             "file_tags_height": self._file_tags_height,
             "editor_path": self._editor_path,
-        }
-        try:
-            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-                json.dump(s, f, ensure_ascii=False, indent=2)
-        except IOError:
-            pass
+        })
 
     # ══════════════════════════════════
     # 启动

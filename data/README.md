@@ -133,8 +133,10 @@ IndeXar 是一个基于 Python 的桌面端个人知识档案库应用，专注�
 ```
 IndeXar/
 ├── main.py               # 程序入口，初始化窗口
-├── gui.py                # 图形界面，组装所有组件（含搜索与交互逻辑）
-├── file_handler.py       # 文件读写、标签与反向链接索引构建
+├── gui.py                # 图形界面，组装所有组件（只负责界面与交互）
+├── file_handler.py       # 文件读写、标签/反向链接索引、标签交集计算
+├── search_engine.py      # 全文检索（遍历匹配，纯逻辑无界面依赖）
+├── config.py             # 本地配置读写（settings.json 的读取与校验）
 ├── markdown_renderer.py  # Markdown → HTML → tkinter.Text 渲染
 ├── theme_manager.py      # 亮/暗主题配色
 ├── icon_renderer.py      # 用 Pillow 绘制界面图标
@@ -152,8 +154,11 @@ IndeXar/
 - `main.py` → 启动 `gui.py`
 - `gui.py` → 调用 `file_handler.py` 获取文件列表与内容、读写 `index.json` 索引
 - `gui.py` → 调用 `markdown_renderer.py` 渲染笔记正文
+- `gui.py` → 调用 `search_engine.py` 执行全文检索（遍历匹配）
 - `gui.py` → 调用 `editor_detect.py` 检测并调用外部编辑器
-- 搜索逻辑内嵌于 `gui.py::_do_search()`：遍历匹配 → 文件名/内容分类 → 片段摘要 → 点击跳转
+- `gui.py` → 通过 `config.py` 读写本地配置；标签交集由
+  `file_handler.intersect_tags()` 计算
+- 分层原则：GUI 只做界面与交互，数据计算、文件读写、检索算法各自独立成模块
 
 ---
 

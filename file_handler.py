@@ -405,6 +405,35 @@ def get_tag_index(force_rebuild=False):
     return build_tag_index()
 
 
+def intersect_tags(tag_names, tag_index=None):
+    """
+    求同时包含全部指定标签的笔记（标签聚合模块的交集运算）。
+
+    参数:
+        tag_names: 标签名列表
+        tag_index: 可选，标签索引；缺省时自动加载
+
+    返回 (matched_names, files):
+        matched_names —— 实际参与求交的标签名（已排序）
+        files         —— 同时含这些标签的笔记路径（已排序）；
+                         有效标签不足 2 个时为空列表
+    """
+    if tag_index is None:
+        tag_index = get_tag_index() or {}
+
+    sets = []
+    matched = []
+    for name in (tag_names or []):
+        if name in tag_index:
+            sets.append(set(tag_index[name] or []))
+            matched.append(name)
+
+    if len(sets) < 2:
+        return sorted(matched), []
+
+    return sorted(matched), sorted(set.intersection(*sets))
+
+
 # ══════════════════════════════════
 # 反向链接系统
 # ══════════════════════════════════
