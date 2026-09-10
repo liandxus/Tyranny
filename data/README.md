@@ -22,9 +22,10 @@ IndeXar 是一个基于 Python 的桌面端个人知识档案库应用，专注�
 | 语言 | Python 3.11 |
 | 界面 | Tkinter（Python 标准库） |
 | 数据存储 | Markdown 文件 + YAML 元数据 |
-| Markdown 渲染 | `markdown` 库 → HTML → `tkinterweb` 展示 |
+| Markdown 渲染 | `markdown` 库 → HTML → 自研 `HTMLParser` → `tkinter.Text` tag 样式 |
 | 元数据解析 | `python-frontmatter` |
-| 搜索 | 遍历搜索（MVP）/ 内存索引（升级） |
+| 搜索 | 遍历匹配（文件名优先 + 内容匹配，含片段摘要与跳转） |
+| 图标 | `Pillow` 绘制，规避系统 emoji 渲染差异 |
 
 ---
 
@@ -131,19 +132,28 @@ IndeXar 是一个基于 Python 的桌面端个人知识档案库应用，专注�
 
 ```
 IndeXar/
-├── main.py              # 程序入口，初始化窗口
-├── gui.py               # 图形界面，组装所有组件
-├── file_handler.py      # 文件读写（list_notes, read_note）
-├── search_engine.py     # 搜索逻辑（关键词匹配）
-├── indexer.py           # 索引模块（可选升级）
-├── data/                # 笔记存储目录
-└── requirements.txt     # Python 依赖
+├── main.py               # 程序入口，初始化窗口
+├── gui.py                # 图形界面，组装所有组件（含搜索与交互逻辑）
+├── file_handler.py       # 文件读写、标签与反向链接索引构建
+├── markdown_renderer.py  # Markdown → HTML → tkinter.Text 渲染
+├── theme_manager.py      # 亮/暗主题配色
+├── icon_renderer.py      # 用 Pillow 绘制界面图标
+├── editor_detect.py      # 外部编辑器检测（App Paths / 注册表 / 常见路径）
+├── context_menu.py       # 自绘无边框右键菜单
+├── test_layout.py        # 布局调试脚本
+├── assets/               # 图标资源（SVG / PNG）
+├── data/                 # 笔记存储目录
+├── index.json            # 标签 + 反向链接索引缓存
+├── settings.json         # 本地个人配置（不纳入版本控制）
+└── requirements.txt      # Python 依赖
 ```
 
 **模块协作**：
 - `main.py` → 启动 `gui.py`
-- `gui.py` → 调用 `file_handler.py` 获取文件列表和内容
-- `gui.py` → 调用 `search_engine.py` 执行搜索
+- `gui.py` → 调用 `file_handler.py` 获取文件列表与内容、读写 `index.json` 索引
+- `gui.py` → 调用 `markdown_renderer.py` 渲染笔记正文
+- `gui.py` → 调用 `editor_detect.py` 检测并调用外部编辑器
+- 搜索逻辑内嵌于 `gui.py::_do_search()`：遍历匹配 → 文件名/内容分类 → 片段摘要 → 点击跳转
 
 ---
 

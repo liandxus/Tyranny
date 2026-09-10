@@ -1,0 +1,5 @@
+# IndeXar 运行时依赖
+# 其余功能（GUI、文件读写、索引、主题等）均基于 Python 标准库实现
+Markdown>=3.4
+python-frontmatter>=1.0
+Pillow>=10.0
