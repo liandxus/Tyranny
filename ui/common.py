@@ -1,8 +1,15 @@
 """
 IndeXar 界面通用工具
 
-与具体面板无关的共享工具：控件 hover 效果、颜色计算。
+与具体面板无关的共享工具：控件 hover 效果、颜色计算、资源路径。
 """
+
+import os
+
+# 项目根目录与资源目录
+# 各界面模块位于 ui/ 包内，不能再用自身 __file__ 推导资源位置，统一在此定义。
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ASSETS_DIR = os.path.join(PROJECT_ROOT, "assets")
 
 # 搜索命中高亮：基色 + 不透明度
 # Tk 的 tag 背景不支持 alpha，故用「基色与内容区背景混色」等效实现，

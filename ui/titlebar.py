@@ -8,11 +8,12 @@ IndeXar 标题栏与窗口管理
 
 import ctypes
 import os
+import re
 import tkinter as tk
 from tkinter import ttk
 
 import icon_renderer
-from ui.common import _add_hover_bg
+from ui.common import _add_hover_bg, ASSETS_DIR
 
 # 窗口边缘拖拽判定阈值（像素）
 RESIZE_EDGE = 8
@@ -114,8 +115,7 @@ class TitleBarMixin:
         import os
         fname = ("light_16.png" if self.theme_mode == "light"
                  else "dark_16.png")
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "assets", fname)
+        path = os.path.join(ASSETS_DIR, fname)
         if not os.path.exists(path):
             return
         try:
