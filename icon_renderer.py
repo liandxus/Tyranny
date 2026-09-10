@@ -24,48 +24,51 @@ def _photo(img: Image.Image) -> ImageTk.PhotoImage:
 
 
 def folder_icon(color: str = "#888888") -> ImageTk.PhotoImage:
-    """📁 风格的文件夹图标（描边风格，激活/未激活都保持形状可辨）"""
+    """📁 风格的文件夹图标（实心填充）"""
     img, draw = _make_image()
 
-    # 主体矩形（描边）
-    draw.rectangle([3, 7, 21, 20], outline=color, width=2)
-    # 左上凸起的文件夹标签（折线）
-    draw.line([(3, 7), (3, 4), (10, 4), (10, 7)], fill=color, width=2)
+    # 上方标签片（缩小凸起）
+    draw.rectangle([4, 6, 9, 8], fill=color)
+    # 主体
+    draw.rectangle([3, 8, 21, 20], fill=color)
 
     return _photo(img)
 
 
 def tag_icon(color: str = "#888888") -> ImageTk.PhotoImage:
-    """书签图标（折角纸片，尖角朝右上，描边风格）"""
-    img, draw = _make_image()
+    """标签图标（书签：窄长条 + 底部 V 形缺口，实心。
 
-    # 主体（右上角切掉一块的五边形，描边）
-    draw.polygon([
-        (3, 3),     # 左上
-        (12, 3),    # 折线起点（上边）
-        (21, 12),   # 折线终点（右边）
-        (21, 21),   # 右下
-        (3, 21),    # 左下
-    ], outline=color, width=2)
-    # 折角示意（L 形细折痕）
-    draw.line([(12, 3), (12, 12), (21, 12)], fill=color, width=1)
+    实心形状必须自带强特征，否则激活深色下会糊成色块——
+    旧版"折角纸张"近似方形就没有这个问题下的辨识度。）"""
+    img, draw = _make_image()
+    draw.polygon([(6, 3), (18, 3), (18, 21), (12, 16), (6, 21)], fill=color)
 
     return _photo(img)
 
 
 def trash_icon(color: str = "#888888") -> ImageTk.PhotoImage:
-    """垃圾桶图标（描边风格，避免实心色块）"""
+    """垃圾桶图标（实心填充）"""
     img, draw = _make_image()
 
-    # 提手（倒 U 折线，两端接在盖子上）
-    draw.line([(9, 6), (9, 2), (15, 2), (15, 6)], fill=color, width=2)
-    # 盖子（横线）
-    draw.line([(4, 6), (20, 6)], fill=color, width=2)
-    # 桶身（略收底的梯形，描边）
-    draw.polygon([(6, 9), (18, 9), (17, 21), (7, 21)],
-                 outline=color, width=2)
+    # 提手
+    draw.rectangle([9, 2, 15, 4], fill=color)
+    # 盖子
+    draw.rectangle([4, 5, 20, 7], fill=color)
+    # 桶身
+    draw.rectangle([6, 8, 18, 21], fill=color)
+    # 桶身竖纹（镂空，透出按钮背景色）
+    for x in (10, 12, 14):
+        draw.line([(x, 10), (x, 19)], fill=(0, 0, 0, 0), width=1)
 
     return _photo(img)
+
+
+def _dim(hex_color: str, factor: float) -> str:
+    """颜色变暗"""
+    r = int(int(hex_color[1:3], 16) * factor)
+    g = int(int(hex_color[3:5], 16) * factor)
+    b = int(int(hex_color[5:7], 16) * factor)
+    return f"#{r:02x}{g:02x}{b:02x}"
 
 
 def sun_icon(color: str = "#888888") -> ImageTk.PhotoImage:

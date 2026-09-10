@@ -20,7 +20,7 @@ class VSCodeTheme:
 
         "nav_bg": "#d8d8d8",
         "nav_fg": "#6a6a6a",
-        "nav_active_fg": "#1a1a1a",
+        "nav_active_fg": "#1f4e79",
         "nav_hover_bg": "#cccccc",
 
         "sidebar_bg": "#e8e8e8",
