@@ -91,7 +91,9 @@ class SearchPanelMixin:
             idx = int(kind.split("_")[-1])
             self._jump_to_search_match(idx)
             return
+        # 从搜索结果打开笔记 → 高亮正文中所有关键词命中
         self._display_note(kind)
+        self._highlight_current_keyword()
 
     def _on_search_tree_motion(self, event):
         iid = self.search_tree.identify_row(event.y)

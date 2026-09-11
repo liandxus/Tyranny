@@ -151,7 +151,6 @@ class IndeXarApp(TitleBarMixin, FileTreeMixin, TagPanelMixin,
         self.content_text.bind("<Motion>", self._on_content_motion)
 
         # Windows 原生窗口管理（Aero Snap + 双击最大化/还原）
-        self.root.after(200, self._fix_alt_tab)
         self.root.after(300, self._setup_win32_window_management)
 
     # ══════════════════════════════════
@@ -264,7 +263,19 @@ class IndeXarApp(TitleBarMixin, FileTreeMixin, TagPanelMixin,
         self.root.destroy()
 
     def run(self):
-        # 启动：后台构建索引 → 随后开始文件轮询监听
+        # 在窗口首次显示之前把 AppWindow 样式设好，再显示：
+        # 外壳建立任务栏按钮时样式已正确，无需事后隐藏/重建（不闪烁）
+        try:
+            self.root.withdraw()
+            self.root.update_idletasks()
+            ok = self._set_appwindow_style()
+            self.root.deiconify()
+        except Exception:
+            ok = False
+        # 极少数环境下提前设置未生效，退回「显示后强制重建」的兜底方案
+        if not ok:
+            self.root.after(300, self._fix_alt_tab)
+
         self._file_snapshots = {}
         self.root.after(100, self._start_background_watch)
         self.root.mainloop()

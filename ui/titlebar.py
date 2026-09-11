@@ -371,20 +371,57 @@ class TitleBarMixin:
 
     # ── Alt+Tab 修复 ──
 
-    def _fix_alt_tab(self):
-        """让 overrideredirect 窗口出现在 Alt+Tab 和任务栏"""
+    def _set_appwindow_style(self):
+        """把 overrideredirect 窗口标为 WS_EX_APPWINDOW，使其进入任务栏与 Alt+Tab。
+
+        窗口尚未显示时调用：样式在窗口映射前就绪，外壳建立任务栏按钮时
+        即为正确状态，不必事后隐藏/重建，因此不会出现闪烁。
+        返回是否已确认生效。"""
         try:
-            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
+            user32 = ctypes.windll.user32
+            hwnd = user32.GetParent(self.root.winfo_id())
+            if not hwnd:
+                return False
             # GWL_EXSTYLE = -20
-            current = ctypes.windll.user32.GetWindowLongW(hwnd, -20)
+            current = user32.GetWindowLongW(hwnd, -20)
             # 移除 WS_EX_TOOLWINDOW (0x80)，添加 WS_EX_APPWINDOW (0x40000)
             new_style = (current & ~0x80) | 0x40000
-            ctypes.windll.user32.SetWindowLongW(hwnd, -20, new_style)
+            if new_style != current:
+                user32.SetWindowLongW(hwnd, -20, new_style)
+                # 强制刷新窗口框架，让任务栏识别
+                user32.SetWindowPos(
+                    hwnd, 0, 0, 0, 0, 0,
+                    0x0002 | 0x0001 | 0x0020,  # NOMOVE | NOSIZE | FRAMECHANGED
+                )
+            return bool(user32.GetWindowLongW(hwnd, -20) & 0x40000)
+        except Exception:
+            return False
+
+    def _fix_alt_tab(self):
+        """兜底：窗口已显示才发现任务栏缺按钮时，强制外壳重建（会闪一下）"""
+        if self._set_appwindow_style():
+            return
+        try:
+            user32 = ctypes.windll.user32
+            hwnd = user32.GetParent(self.root.winfo_id())
+            if not hwnd:
+                return
+            # GWL_EXSTYLE = -20
+            current = user32.GetWindowLongW(hwnd, -20)
+            # 移除 WS_EX_TOOLWINDOW (0x80)，添加 WS_EX_APPWINDOW (0x40000)
+            new_style = (current & ~0x80) | 0x40000
+            user32.SetWindowLongW(hwnd, -20, new_style)
             # 强制刷新窗口框架，让任务栏识别
-            ctypes.windll.user32.SetWindowPos(
+            user32.SetWindowPos(
                 hwnd, 0, 0, 0, 0, 0,
                 0x0002 | 0x0001 | 0x0020,  # NOMOVE | NOSIZE | FRAMECHANGED
             )
+            # 仅改样式时，外壳往往要等窗口下一次被激活才补建任务栏按钮，
+            # 表现为「窗口已显示、任务栏图标要点击或切换焦点后才出现」。
+            # 这里隐藏再显示一次，强制外壳立即重建按钮。
+            user32.ShowWindow(hwnd, 0)   # SW_HIDE
+            user32.ShowWindow(hwnd, 5)   # SW_SHOW
+            user32.SetForegroundWindow(hwnd)
         except Exception:
             pass
 

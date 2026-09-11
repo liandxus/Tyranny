@@ -27,8 +27,12 @@ def search_notes(keyword, current_note=None):
 
     返回 (name_matches, content_matches, current_hit):
         name_matches     —— 文件名命中关键词的笔记路径列表
-        content_matches  —— 正文命中但文件名未命中的笔记路径列表
+        content_matches  —— 正文命中关键词的笔记路径列表
         current_hit      —— current_note 的正文是否命中（供命中数统计使用）
+
+    两组各自独立：文件名与正文都命中的笔记会同时出现在两组。
+    （旧版用 elif 去重，导致 test3.md 这种「文件名含 test、正文也含 test」
+    的笔记不出现在内容组，打开后却有几处高亮，结果与正文不一致。）
     """
     keyword_lower = (keyword or "").strip().lower()
     name_matches = []
@@ -47,7 +51,7 @@ def search_notes(keyword, current_note=None):
 
         if name_hit:
             name_matches.append(rel_path)
-        elif content_hit:
+        if content_hit:
             content_matches.append(rel_path)
 
         if current_note and rel_path == current_note and content_hit:

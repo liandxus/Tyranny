@@ -608,6 +608,8 @@ def build_tag_index():
         except Exception:
             pass
     merged["tags"] = sorted_map
+    # 只保留已知字段，丢弃历史版本遗留的未知键
+    merged = {k: merged[k] for k in ("tags", "backlinks") if k in merged}
     with open(INDEX_FILE, "w", encoding="utf-8") as f:
         json.dump(merged, f, ensure_ascii=False, indent=2)
     return sorted_map
@@ -721,6 +723,8 @@ def build_backlink_index():
         except Exception:
             pass
     merged["backlinks"] = backlinks
+    # 只保留已知字段，丢弃历史版本遗留的未知键
+    merged = {k: merged[k] for k in ("tags", "backlinks") if k in merged}
     with open(INDEX_FILE, "w", encoding="utf-8") as f:
         json.dump(merged, f, ensure_ascii=False, indent=2)
     return backlinks
