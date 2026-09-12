@@ -80,6 +80,8 @@ class IndeXarApp(TitleBarMixin, FileTreeMixin, TagPanelMixin,
         # 导航历史（Alt + ←/→）
         self._nav_history = []
         self._nav_index = -1
+        # 各笔记离开时的滚动位置（yview 分数），后退/前进时恢复
+        self._nav_scroll = {}
 
         # 字号
         self._font_size = 11
@@ -369,23 +371,16 @@ class IndeXarApp(TitleBarMixin, FileTreeMixin, TagPanelMixin,
         self._refresh_file_tags()
 
     def _rerender_current_note(self):
-        """当前浏览的笔记被外部修改 → 重渲染并保持滚动位置"""
+        """当前浏览的笔记被外部修改 → 重渲染并保持阅读位置"""
         rel = self._current_note_path
         if not rel:
             return
         content = read_note(rel)
         if content is None:
             return
-        try:
-            top = self.content_text.yview()[0]
-        except Exception:
-            top = 0.0
+        idx = self._capture_read_position()
         self._render_markdown(content)
         self._render_backlinks(rel)
         self.content_text.configure(state=tk.DISABLED)
         self._refresh_file_tags()
-        try:
-            self.root.update_idletasks()
-            self.content_text.yview_moveto(top)
-        except Exception:
-            pass
+        self.root.after_idle(lambda: self._restore_read_position(idx))

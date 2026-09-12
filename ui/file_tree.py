@@ -788,6 +788,10 @@ class FileTreeMixin:
         if getattr(self, '_right_clicking', False):
             self._right_clicking = False
             return
+        # 已在浏览同一篇时不再重复加载：搜索/标签/历史跳转等会同步树选中，
+        # 若不拦截会多渲染一遍，还会把滚动位置归零
+        if iid == getattr(self, "_current_note_path", None):
+            return
         if is_dir == "True" or is_dir is True:
             if self.tree.item(selected[0], "open"):
                 self.tree.item(selected[0], open=False)

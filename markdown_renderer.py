@@ -853,7 +853,10 @@ class _MarkdownHTMLRenderer(HTMLParser):
             self.w.window_create("end", window=holder, pady=6, align="center")
         except tk.TclError:
             return
-        self._insert("\n")
+        # 行尾换行直接插入、不带样式栈标签：图片位于链接内时锚点仍在栈上，
+        # 若让换行带上链接标签，其背景会从图片一直涂到行尾，悬浮高亮与
+        # 点击热区随之外溢到图片右侧的空白处
+        self.w.insert("end", "\n")
 
     def _bind_wheel_to_text(self, widget):
         """把嵌入控件（图片/表格）的滚轮事件转发给 Text，

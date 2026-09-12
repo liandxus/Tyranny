@@ -354,11 +354,17 @@ class ContentViewMixin:
         self.content_text.configure(state=tk.DISABLED)
 
 
-    def _display_note(self, rel_path, _record=True):
+    def _display_note(self, rel_path, _record=True, _restore_scroll=False):
         content = read_note(rel_path)
         if content is None:
             self._set_content(f"⚠️  找不到文件：{rel_path}.md")
             return
+        # 离开当前笔记前记住阅读位置，供后退/前进恢复
+        prev = getattr(self, "_current_note_path", None)
+        if prev and prev != rel_path:
+            idx = self._capture_read_position()
+            if idx:
+                self._nav_scroll[prev] = idx
         if _record:
             self._push_nav_history(rel_path)
         self._current_note_path = rel_path
@@ -382,6 +388,61 @@ class ContentViewMixin:
         self._refresh_file_tags()
         # 布局完成后判断内容是否超宽（表格/图片）
         self.root.after_idle(self._sync_hscroll)
+        # 历史跳转（后退/前进）恢复离开时的阅读位置
+        if _restore_scroll:
+            self._restore_read_position(self._nav_scroll.get(rel_path))
+
+    # ── 阅读位置记录（后退/前进恢复，重渲染保持） ──
+
+    def _capture_read_position(self):
+        """记录当前阅读位置：取视口顶部第一行的字符索引。
+
+        不记 yview 分数——重渲染后内容高度会有小幅变化，分数随之漂移；
+        字符索引在内容不变时是稳定的，恢复时再按像素位置换算。"""
+        try:
+            return self.content_text.index("@0,1")
+        except Exception:
+            return None
+
+    def _restore_read_position(self, idx):
+        """把记录的位置滚回视口顶部。
+
+        首绘后内容高度仍会微调（行距、嵌入控件逐步就位），故定位做两次：
+        布局完成后按像素换算恢复一次，稍后再收敛一次。"""
+        if not idx:
+            return
+
+        def _count_lines(t, a, b):
+            """a→b 的像素高度；tkinter 的 count 返回元组，需解包"""
+            v = t.count(a, b, "ypixels")
+            return v[0] if isinstance(v, tuple) else v
+
+        def _apply():
+            try:
+                self.root.update_idletasks()
+                t = self.content_text
+                tgt_line = int(float(idx))
+                total = _count_lines(t, "1.0", "end-1c")
+                viewport = t.winfo_height()
+                if not total or total <= viewport:
+                    return
+                denom = max(total - viewport, 1)
+                off = _count_lines(t, "1.0", idx) or 0
+                t.yview_moveto(min(max(off / denom, 0.0), 1.0))
+                # 按实际顶行与目标顶行的行差微调（比例估算受行高不均影响）
+                for _ in range(2):
+                    self.root.update_idletasks()
+                    cur = int(float(t.index("@0,1")))
+                    diff = tgt_line - cur
+                    if diff:
+                        t.yview_scroll(diff, "units")
+                    else:
+                        break
+            except tk.TclError:
+                pass
+
+        self.root.after_idle(_apply)
+        self.root.after(80, _apply)
 
     def _render_markdown(self, md_text):
         from markdown_renderer import render_markdown
@@ -445,8 +506,9 @@ class ContentViewMixin:
         return "break"
 
     def _goto_history_entry(self, rel_path):
-        """跳到历史中的某篇笔记（不写入历史，否则前后指针会被打乱）"""
-        self._display_note(rel_path, _record=False)
+        """跳到历史中的某篇笔记（不写入历史，否则前后指针会被打乱）；
+        后退/前进属于“回到刚才”，恢复该笔记离开时的滚动位置"""
+        self._display_note(rel_path, _record=False, _restore_scroll=True)
         try:
             self.tree.selection_set(f"f:{rel_path}")
             self.tree.see(f"f:{rel_path}")
@@ -686,6 +748,7 @@ class ContentViewMixin:
         self._full_display_name = None
         self._nav_history = []
         self._nav_index = -1
+        self._nav_scroll.clear()        # 历史已清空，滚动记忆随之作废
         self._update_nav_buttons()
         self._close_file_btn.pack_forget()
         self._refresh_file_tags()
