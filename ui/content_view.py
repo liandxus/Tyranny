@@ -11,7 +11,8 @@ from tkinter import ttk
 
 import icon_renderer
 from context_menu import ContextMenu
-from file_handler import get_backlinks, find_note_by_name, read_note
+from file_handler import (get_backlinks, find_note_by_name, read_note,
+                          note_encoding_label)
 from markdown_renderer import render_markdown
 from ui.common import _blend_hex, _readable_fg, SEARCH_HIT_ALPHA, \
     SEARCH_HIT_COLOR
@@ -371,7 +372,13 @@ class ContentViewMixin:
         self._render_markdown(content)
         self._render_backlinks(rel_path)
         self.content_text.configure(state=tk.DISABLED)
-        self.status_left.configure(text=f"   当前：{rel_path}.md")
+        # 非 UTF-8 的笔记（如编辑器以 GBK 保存）在状态栏说明一次，
+        # 使用户知道所见文字是按何种编码解读出来的
+        status = f"   当前：{rel_path}.md"
+        enc_hint = note_encoding_label(rel_path)
+        if enc_hint:
+            status += f"（该笔记为{enc_hint}，已按此解码）"
+        self.status_left.configure(text=status)
         self._refresh_file_tags()
         # 布局完成后判断内容是否超宽（表格/图片）
         self.root.after_idle(self._sync_hscroll)

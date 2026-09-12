@@ -4,6 +4,7 @@ import json
 import shutil
 import sys
 import time
+import codecs
 import frontmatter
 
 # 打包（PyInstaller）后用户数据应跟随 exe 所在目录，而非临时解压目录
@@ -19,6 +20,89 @@ TRASH_DIR = os.path.join(DATA_DIR, ".trash")
 
 # 首次运行（打包后 data/ 不随 exe 分发）时自动创建
 os.makedirs(DATA_DIR, exist_ok=True)
+
+# 各笔记最近一次读取时识别出的编码：{相对路径: (编码, 是否严格解码成功)}
+NOTE_ENCODINGS = {}
+
+# 编码的中文名称（用于状态栏提示）
+_ENCODING_LABELS = {
+    "utf-8": "UTF-8",
+    "utf-8-sig": "UTF-8（含 BOM）",
+    "gb18030": "GB18030",
+    "utf-16": "UTF-16",
+    "utf-32": "UTF-32",
+    "unknown": "未知编码",
+}
+
+# BOM 检测顺序：UTF-32 的前缀包含 UTF-16 的前缀，故必须先判 UTF-32
+_BOMS = (
+    (codecs.BOM_UTF8, "utf-8-sig"),
+    (codecs.BOM_UTF32_LE, "utf-32"),
+    (codecs.BOM_UTF32_BE, "utf-32"),
+    (codecs.BOM_UTF16_LE, "utf-16"),
+    (codecs.BOM_UTF16_BE, "utf-16"),
+)
+
+
+def _decode_text(raw):
+    """把笔记文件的字节解码为文本。
+
+    顺序为：BOM → UTF-8 → GB18030（GBK/GB2312 的超集）。后两级都做严格
+    解码：若字节流存在非法序列，立即换下一种编码，而不是就地插入替换字符。
+    返回 (text, encoding, exact)；exact 为 False 表示两种编码都无法严格解码，
+    文本以替换字符呈现，调用方可据此提示用户。行尾统一为 "\\n"。"""
+    for bom, enc in _BOMS:
+        if raw.startswith(bom):
+            try:
+                text = raw.decode(enc)
+            except UnicodeDecodeError:
+                break
+            return _normalize_newlines(text), enc, True
+    try:
+        return _normalize_newlines(raw.decode("utf-8")), "utf-8", True
+    except UnicodeDecodeError:
+        pass
+    try:
+        return _normalize_newlines(raw.decode("gb18030")), "gb18030", True
+    except UnicodeDecodeError:
+        pass
+    return _normalize_newlines(raw.decode("utf-8", errors="replace")), "unknown", False
+
+
+def _normalize_newlines(text):
+    """统一行尾为 "\\n"（等价于文本模式读取时的通用换行处理）"""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def read_text_file(filepath):
+    """按自动识别的编码读取文本文件，返回 (text, encoding, exact)。
+
+    文件不存在或读取失败时返回 (None, None, False)。所有需要读取笔记正文
+    或元数据的地方都应经由此函数，使显示、检索与索引对同一文件使用同一
+    种编码——否则会出现"能显示却搜不到"这类不一致。"""
+    if not os.path.exists(filepath):
+        return None, None, False
+    try:
+        with open(filepath, "rb") as f:
+            raw = f.read()
+    except OSError:
+        return None, None, False
+    return _decode_text(raw)
+
+
+def note_encoding_label(rel_path):
+    """返回该笔记的编码提示文字；UTF-8 或尚未读取过时返回 None。
+
+    编码检测的结果只在读取后才有，故以最近一次读取的记录为准。"""
+    info = NOTE_ENCODINGS.get(rel_path)
+    if not info:
+        return None
+    enc, exact = info
+    if enc == "utf-8" or enc == "utf-8-sig":
+        return None
+    if enc == "unknown" or not exact:
+        return "未知编码，部分字符已用替换符号显示"
+    return _ENCODING_LABELS.get(enc, enc.upper())
 
 
 def list_notes():
@@ -83,16 +167,17 @@ def find_note_by_name(name):
 
 def read_note(rel_path):
     """
-    根据相对路径读取 .md 文件
+    根据相对路径读取 .md 文件，返回正文文本（编码自动识别）。
     rel_path: "README" 或 "World_Archive/01_World_Overview/01_World_Overview"
-    注意：不含 .md 后缀
+    注意：不含 .md 后缀；文件不存在或读取失败返回 None
     """
     rel_path = rel_path.replace("\\", "/")
     filepath = os.path.join(DATA_DIR, f"{rel_path}.md")
-    if not os.path.exists(filepath):
+    text, enc, exact = read_text_file(filepath)
+    if text is None:
         return None
-    with open(filepath, "r", encoding="utf-8") as f:
-        return f.read()
+    NOTE_ENCODINGS[rel_path] = (enc, exact)
+    return text
 
 
 # ── 内部函数 ──
@@ -481,11 +566,11 @@ def parse_note_metadata(filepath):
     使用 python-frontmatter 解析 Markdown 文件的 YAML 元数据。
     返回 (metadata_dict, body_text)，解析失败返回 ({}, '')。
     """
-    if not os.path.exists(filepath):
+    text, _enc, _exact = read_text_file(filepath)
+    if text is None:
         return {}, ""
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            post = frontmatter.load(f)
+        post = frontmatter.loads(text)
         return dict(post.metadata), post.content
     except Exception:
         return {}, ""
@@ -533,10 +618,11 @@ def set_note_tags(rel_path, tags):
     tag_line = "tags: [" + ", ".join(_yaml_tag(t) for t in clean) + "]"
 
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            text = f.read()
+        with open(filepath, "rb") as f:
+            raw = f.read()
     except (IOError, OSError):
         return None
+    text, enc, exact = _decode_text(raw)
 
     lines = text.split("\n")
 
@@ -572,10 +658,15 @@ def set_note_tags(rel_path, tags):
     if not new_text.endswith("\n"):
         new_text += "\n"
 
+    # 按原编码写回：用户可能用 GBK 编辑器写作，此处只改 tags 字段，
+    # 不应借机把整篇笔记的编码换掉；无法识别编码时才退用 UTF-8。
+    write_enc = enc if (exact and enc not in (None, "unknown")) else "utf-8"
+    if b"\r\n" in raw:                      # 行尾风格沿用原文件
+        new_text = new_text.replace("\n", "\r\n")
     try:
-        with open(filepath, "w", encoding="utf-8") as f:
+        with open(filepath, "w", encoding=write_enc, newline="") as f:
             f.write(new_text)
-    except (IOError, OSError):
+    except (ValueError, IOError, OSError):
         return None
     return clean
 
@@ -698,10 +789,8 @@ def build_backlink_index():
     backlinks = {}
     for item in _walk(DATA_DIR):
         filepath = os.path.join(DATA_DIR, f"{item['path']}.md")
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                content = f.read()
-        except Exception:
+        content, _enc, _exact = read_text_file(filepath)
+        if content is None:
             continue
         # 跳过 YAML front matter
         if content.startswith("---"):

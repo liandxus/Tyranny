@@ -6,9 +6,12 @@ IndeXar 文件树面板
 以及笔记的打开入口。
 """
 
+import ctypes
 import os
 import shutil
 import subprocess
+import tempfile
+import time
 import tkinter as tk
 from tkinter import ttk, messagebox
 
@@ -18,6 +21,72 @@ from file_handler import (list_notes_tree, create_note, make_subdir,
                           rename_note, rename_folder, delete_note,
                           delete_folder)
 from ui.common import _add_hover_bg
+
+
+def _shell_exec(exe_path, filepath, workdir=None):
+    """Windows：用 ShellExecute 启动程序，返回 (返回码, 是否成功)。
+
+    与用户在资源管理器里双击等价：不创建管道、不继承本进程的句柄，
+    工作目录可单独指定。Electron 类编辑器（Typora、VS Code 等）在
+    CreateProcess 下偶发"进程起来了却不出窗口"，换用 ShellExecute 更稳。
+    返回值 >32 表示成功（<=32 是 Windows 的错误码，如 2=找不到文件、
+    5=拒绝访问）。"""
+    try:
+        rc = ctypes.windll.shell32.ShellExecuteW(
+            None, "open", str(exe_path), f'"{filepath}"',
+            str(workdir) if workdir else None, 1)
+        return rc, rc > 32
+    except Exception as exc:
+        return 0, False
+
+
+def _editor_log(msg):
+    """记录外部编辑器的启动过程，供排查"点了没反应"类问题。
+
+    写到 %TEMP%/indexar_editor.log；文件超过 64KB 时清空重来，
+    避免长期使用无限增长。"""
+    try:
+        path = os.path.join(tempfile.gettempdir(), "indexar_editor.log")
+        if os.path.exists(path) and os.path.getsize(path) > 64 * 1024:
+            os.remove(path)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg))
+    except Exception:
+        pass
+
+
+def _vscode_cli(editor):
+    """若 editor 是 VS Code 的 Code.exe，返回其自带的命令行包装脚本路径。
+
+    VS Code 的 GUI 程序需要配合 resources 下的 cli.js 才能把待打开的文件
+    转交给已运行的实例；在部分安装形态下（例如应用资源位于版本子目录、
+    根目录只有 Code.exe 与 bin/），直接启动 Code.exe 会因找不到自身资源
+    而立即退出，文件既不会打开、也不会有任何提示。bin/code.cmd 正是官方
+    为此提供的入口，故优先使用它。
+    返回命令行的完整路径，没有则返回 None。"""
+    base = os.path.basename(editor or "").lower()
+    if base not in ("code.exe", "code - insiders.exe"):
+        return None
+    name = ("code-insiders.cmd" if "insider" in base else "code.cmd")
+    candidate = os.path.join(os.path.dirname(editor), "bin", name)
+    return candidate if os.path.isfile(candidate) else None
+
+
+def _process_running(exe_path):
+    """判断某程序是否已在运行（按 exe 名查进程列表）。
+
+    用于区分"冷启动"与"交给已有实例"：Typora 一类程序在已有实例
+    运行时，新进程把文件交给它后立即退出，窗口是否前置由它自己决定，
+    用户可能因此误以为没有反应。"""
+    name = os.path.basename(exe_path or "")
+    if not name:
+        return False
+    try:
+        out = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {name}"],
+                             capture_output=True, text=True, timeout=3).stdout
+        return name.lower() in out.lower()
+    except Exception:
+        return False
 
 
 class FileTreeMixin:
@@ -486,29 +555,150 @@ class FileTreeMixin:
 
     def _open_in_editor(self, filepath=None):
         """用外部编辑器打开文件"""
-        import subprocess
         if filepath is None:
             sel = self.tree.selection()
             if not sel:
+                self.status_left.configure(text="   请先在文件树中选中一篇笔记")
                 return
             vals = self.tree.item(sel[0], "values")
             if not vals or vals[1] == "True" or vals[1] is True:
+                self.status_left.configure(text="   文件夹不能用编辑器打开")
                 return  # 跳过文件夹
             iid = vals[0]
             from file_handler import DATA_DIR
             filepath = os.path.join(DATA_DIR, f"{iid}.md")
             if not os.path.exists(filepath):
+                self.status_left.configure(text="   找不到笔记文件")
                 return
-        import shutil
-        editor = self._editor_path or "notepad.exe"
+        # 配置里可能是正斜杠，统一成当前系统的写法
+        editor = os.path.normpath(self._editor_path or "notepad.exe")
+        fallback = False
         # 路径失效（软件被卸载或迁移）时回退系统记事本
         if not (os.path.isfile(editor) or shutil.which(editor)):
-            editor = "notepad.exe"
+            editor, fallback = "notepad.exe", True
+        reused = (not fallback) and _process_running(editor)
+        workdir = os.path.dirname(editor) if os.path.isfile(editor) else None
+        _editor_log("open: editor=%r exists=%s which=%s reused=%s file=%r"
+                    % (editor, os.path.isfile(editor),
+                       shutil.which(editor), reused, filepath))
+
+        # VS Code 优先走自带 CLI：其 GUI 程序在部分安装形态下无法自行
+        # 把文件交接给已运行的实例，且 ShellExecute 的返回码不能反映结果
+        cli = None if fallback else _vscode_cli(editor)
+        if cli:
+            self._open_with_cli(cli, filepath)
+            return
+
+        # ① 首选 ShellExecute：与双击等价，不继承本进程的句柄
+        # ② 失败再用 Popen（shell=True 不能用：路径含空格会被二次解析）
+        # ③ 仍失败才回退记事本
+        rc, ok = _shell_exec(editor, filepath, workdir)
+        _editor_log("  ShellExecute rc=%s ok=%s" % (rc, ok))
+        if not ok:
+            try:
+                subprocess.Popen(
+                    [editor, filepath], cwd=workdir,
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL)
+                _editor_log("  Popen 已发起")
+            except Exception as exc:
+                _editor_log("  Popen 异常: %r" % (exc,))
+                try:
+                    subprocess.Popen(["notepad.exe", filepath],
+                                     stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL)
+                    fallback = True
+                    _editor_log("  已回退记事本")
+                except Exception as exc2:
+                    _editor_log("  记事本也失败: %r" % (exc2,))
+                    self.status_left.configure(
+                        text=f"   无法启动外部编辑器：{editor}")
+                    return
+
+        # 启动结果一律反馈到状态栏：成功时不提示，用户无从判断
+        # 程序到底执行了没有（还是根本没触发）
+        app_name = os.path.splitext(os.path.basename(editor))[0]
+        if fallback:
+            self.status_left.configure(
+                text=f"   编辑器不可用，已改用记事本打开：{editor}")
+        else:
+            self.status_left.configure(
+                text=f"   正在用 {app_name} 打开：{os.path.basename(filepath)}")
+        # 稍后回查进程是否真的起来了，把"完成/失败"落定到状态栏
+        self.root.after(
+            1500, lambda e=editor, f=filepath, r=reused:
+            self._report_editor_result(e, f, r, 0))
+
+    def _open_with_cli(self, cli, filepath):
+        """用编辑器自带的命令行包装脚本打开笔记。
+
+        命令行脚本会等待并把文件交给已运行的实例，返回码即真实结果，
+        因此不必再用"进程中是否存在该程序"来推测是否打开成功。脚本在
+        后台执行，界面按固定间隔回查它的返回码。"""
         try:
-            # 不使用 shell=True：路径含空格时会被二次解析，导致启动失败
-            subprocess.Popen([editor, filepath])
-        except Exception:
-            subprocess.Popen(["notepad.exe", filepath])
+            proc = subprocess.Popen(
+                [os.environ.get("COMSPEC", "cmd.exe"), "/c", cli,
+                 "--reuse-window", filepath],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW)
+        except Exception as exc:
+            _editor_log("  CLI 启动异常: %r" % (exc,))
+            self.status_left.configure(
+                text="   无法启动 VS Code，请确认安装是否完整")
+            return
+        _editor_log("  CLI 已发起: %r file=%r" % (cli, filepath))
+        self.status_left.configure(
+            text=f"   正在用 VS Code 打开：{os.path.basename(filepath)}")
+        self.root.after(
+            900, lambda: self._poll_cli_result(proc, filepath, 0))
+
+    def _poll_cli_result(self, proc, filepath, attempt):
+        """回查命令行脚本的返回码：0 表示文件已交给编辑器"""
+        note = os.path.basename(filepath)
+        rc = proc.poll()
+        if rc is None:
+            if attempt < 16:                # 最多等待约 15 秒
+                self.root.after(900, lambda: self._poll_cli_result(
+                    proc, filepath, attempt + 1))
+                return
+            self.status_left.configure(
+                text=f"   已请求 VS Code 打开：{note}（等待较久，请查看编辑器）")
+            return
+        _editor_log("  CLI rc=%s" % rc)
+        if rc == 0:
+            self.status_left.configure(text=f"   已在 VS Code 中打开：{note}")
+        else:
+            self.status_left.configure(
+                text=f"   VS Code 未能打开该笔记（返回码 {rc}）")
+
+    def _report_editor_result(self, editor, filepath, reused, attempt=0):
+        """回查进程是否真的起来了。
+
+        Electron 类编辑器（Typora 等）冷启动要数秒，单次查询容易在
+        进程尚未建立时就判定失败，故分几次轮询，任一次命中即算成功。"""
+        name = os.path.splitext(os.path.basename(editor))[0]
+        note = os.path.basename(filepath)
+        running = _process_running(editor)
+        _editor_log("  check#%d running=%s" % (attempt, running))
+        if running:
+            if reused:
+                # 进程本就存在，只能说明"请求已发出"，不能据此断言已打开
+                self.status_left.configure(
+                    text=f"   已请求在 {name} 中打开：{note}"
+                         f"（窗口未出现请查看托盘）")
+            else:
+                self.status_left.configure(text=f"   已用 {name} 打开：{note}")
+            return
+        if attempt < 4:                     # 最多再查 4 次，共约 6 秒
+            self.root.after(
+                1200, lambda: self._report_editor_result(
+                    editor, filepath, reused, attempt + 1))
+            return
+        self.status_left.configure(
+            text=f"   {name} 未能启动（已等待约 6 秒），"
+                 f"请确认它单独打开是否正常")
 
 
     def _collect_expanded_dirs(self):
