@@ -10,9 +10,7 @@ import ctypes
 import os
 import re
 import tkinter as tk
-from tkinter import ttk
 
-import icon_renderer
 from ui.common import (_add_hover_bg, ASSETS_DIR,
                        set_appwindow_style, force_appwindow_style)
 
@@ -149,7 +147,6 @@ class TitleBarMixin:
 
     def _update_title_logo(self):
         """加载当前主题对应的应用图标 PNG"""
-        import os
         fname = ("light_24.png" if self.theme_mode == "light"
                  else "dark_24.png")
         path = os.path.join(ASSETS_DIR, fname)

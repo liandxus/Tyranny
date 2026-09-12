@@ -11,11 +11,14 @@ from tkinter import ttk
 
 import icon_renderer
 from context_menu import ContextMenu
-from file_handler import (get_backlinks, find_note_by_name, read_note,
-                          note_encoding_label)
+from file_handler import (
+    get_backlinks,
+    find_note_by_name,
+    read_note,
+    note_encoding_label,
+    DATA_DIR,
+)
 from markdown_renderer import render_markdown
-from ui.common import _blend_hex, _readable_fg, SEARCH_HIT_ALPHA, \
-    SEARCH_HIT_COLOR
 
 
 class ContentViewMixin:
@@ -23,7 +26,6 @@ class ContentViewMixin:
 
     def _render_backlinks(self, rel_path):
         """在内容底部使用 Text tag 渲染百科风格反向链接框"""
-        from file_handler import get_backlinks
 
         name = rel_path.split("/")[-1]
         backlinks = get_backlinks(name)
@@ -384,6 +386,10 @@ class ContentViewMixin:
         enc_hint = note_encoding_label(rel_path)
         if enc_hint:
             status += f"（该笔记为{enc_hint}，已按此解码）"
+        # 导航换了笔记：作废可能仍生效的状态栏提示快照，否则鼠标不动、
+        # 仅用键盘后退/前进后，_clear_extlink_hint 会把上一篇的
+        # 「当前：xxx.md」写回状态栏，显示出一篇并未打开的笔记。
+        self._hint_saved_status = False
         self.status_left.configure(text=status)
         self._refresh_file_tags()
         # 布局完成后判断内容是否超宽（表格/图片）
@@ -445,7 +451,6 @@ class ContentViewMixin:
         self.root.after(80, _apply)
 
     def _render_markdown(self, md_text):
-        from markdown_renderer import render_markdown
         self.content_text.configure(state=tk.NORMAL)
         # 先让控件完成布局，图片「适应宽度」才能按实际宽度计算
         try:
@@ -462,7 +467,6 @@ class ContentViewMixin:
 
     def _current_note_dir(self):
         """当前笔记所在目录的绝对路径（供图片相对路径解析）"""
-        from file_handler import DATA_DIR
         rel = getattr(self, "_current_note_path", None)
         if not rel:
             return DATA_DIR
@@ -627,7 +631,6 @@ class ContentViewMixin:
 
     def _navigate_to_link(self, target_name):
         """点击 [[内部链接]] 时跳转到对应笔记"""
-        from file_handler import find_note_by_name
         # 兼容 [[文件.md]] 和 [[文件]] 两种写法
         target_name = target_name.replace(".md", "")
         path = find_note_by_name(target_name)
@@ -760,6 +763,11 @@ class ContentViewMixin:
 
     def _set_content(self, text):
         self._current_note_path = None
+        # 与 _close_file 保持一致：_update_title_display 只看 _full_display_name，
+        # 不清空的话，头部宽度下次变化时会把这个旧文件名重新写回标题栏，
+        # 出现正文显示「找不到文件」而标题栏仍写着上一篇笔记的情形。
+        self._full_display_name = None
+        self._hint_saved_status = False
         self._close_file_btn.pack_forget()
         self._refresh_file_tags()
         self.content_title.configure(text="选择一篇笔记开始阅读")

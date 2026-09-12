@@ -16,9 +16,12 @@ import markdown
 
 # 站内链接的判定、取名与代码区识别与反向索引共用（见 file_handler），
 # 两处若各写一套，就会出现"能跳转却不进反链"这类不一致
-from file_handler import (looks_like_note_target as _looks_like_note_target,
-                          note_name_from_href as _note_name_from_href,
-                          mask_code_regions as _mask_code_regions)
+from file_handler import (
+    looks_like_note_target as _looks_like_note_target,
+    note_name_from_href as _note_name_from_href,
+    mask_code_regions as _mask_code_regions,
+    DATA_DIR,
+)
 
 # ── 语法高亮（可选依赖）：缺失时代码块退化为纯文本，不影响其它渲染 ──
 try:
@@ -137,7 +140,11 @@ def _preprocess_strikethrough(text):
     out = []
     in_fence = False
     for line in text.split("\n"):
-        if line.lstrip().startswith("```"):
+        stripped = line.lstrip()
+        # 围栏判定与 _preprocess_task_lists、file_handler.mask_code_regions 一致：
+        # ``` 与 ~~~ 都算围栏。此前只认 ```，导致 ~~~ 围栏里的代码正文
+        # 被当作普通文本改写，显示与复制的内容一并失真。
+        if stripped.startswith("```") or stripped.startswith("~~~"):
             in_fence = not in_fence
             out.append(line)
             continue
@@ -295,6 +302,13 @@ class _MarkdownHTMLRenderer(HTMLParser):
         elif tag in ('th', 'td'):
             self._current_cell = ""  # 开始新单元格
             return
+        elif tag == 'img':
+            # 单元格里的图片不建嵌入控件，退化为文本占位。
+            # 此前该分支落到下方行内处理，图片被直接 window_create 进主 Text，
+            # 单元格只拿到空串，图片跑到表格之外，整张表的图文错位。
+            alt = a.get('alt', '') or os.path.basename(a.get('src', ''))
+            self._current_cell += f"[图片: {alt}]"
+            return
 
         # ── 行内样式（压栈）──
         if tag in ('strong', 'b'):
@@ -307,19 +321,29 @@ class _MarkdownHTMLRenderer(HTMLParser):
             self._stack.append('strikethrough')
         elif tag == 'a':
             href = a.get('href', '')
-            self._anchor_title = a.get('title', '')
+            title = a.get('title', '')
+            # 先清空再按分支回填：此前任何 <a> 都写入 _anchor_title，
+            # 但只有 wikilink/extlink 会在 _pop_anchor 里清空。像 [x](foo.txt "T")
+            # 这类不进栈的链接会让标题残留，被后续图片当作悬浮提示显示出来。
+            self._anchor_title = ""
             if href.startswith('wikilink:'):
+                self._anchor_title = title
                 self._stack.append(('wikilink', href[9:]))
             elif href.startswith(('http://', 'https://')):
+                self._anchor_title = title
                 self._stack.append(('extlink', href))
             elif _looks_like_note_target(href):
                 # 非协议链接：形如 [文字](笔记名) 或 [文字](./笔记.md)，
                 # 与 [[笔记名]] 走同一套跳转逻辑
+                self._anchor_title = title
                 self._stack.append(('wikilink', _note_name_from_href(href)))
 
         # ── 块级元素 ──（先清栈确保无残留 tag）
         elif tag in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
-            self._stack.clear()
+            # 只清行内样式与旧标题，保留 quote 这类外层块级样式。
+            # 此前无条件 clear()，引用块里的标题会把 quote 一并清掉且不恢复，
+            # 该引用块标题之后的内容全部失去引用样式。
+            self._clear_inline_stack()
             level = int(tag[1])
             self._stack.append(f'heading{level}')
         elif tag == 'blockquote':
@@ -334,7 +358,13 @@ class _MarkdownHTMLRenderer(HTMLParser):
         elif tag in ('ul', 'ol'):
             self._flush_pending_bullet()        # 列表项里直接嵌套列表
             self._list_depth += 1
-            self._list_stack.append([tag, 1])   # 每层独立记录类型与编号
+            # 起始编号取 start 属性：编号不从 1 开始（或列表被中间块打断）时
+            # markdown 会写出 <ol start="3">，写死 1 会让编号与原文不符
+            try:
+                start = int(a.get('start') or 1)
+            except (TypeError, ValueError):
+                start = 1
+            self._list_stack.append([tag, start])  # 每层独立记录类型与编号
         elif tag == 'li':
             # 符号推迟到第一段文本：任务列表项要用复选框替代圆点
             self._li_pending = True
@@ -391,6 +421,8 @@ class _MarkdownHTMLRenderer(HTMLParser):
         if tag == 'table':
             self._in_table = False
             self._stack.clear()  # 安全清栈，防止表格内残留样式泄露
+            # 列表项以表格开头时，项目符号仍挂起，需在表格之前补插
+            self._flush_pending_bullet()
             self._render_table()
             return
         if self._in_table:
@@ -456,8 +488,11 @@ class _MarkdownHTMLRenderer(HTMLParser):
             return
 
         # 表格单元格内：累积文本（跨行内标签合并为一个单元格）
+        # 不经 unescape：HTMLParser 默认 convert_charrefs=True，handle_data
+        # 收到的文本已反转义一次。再转一次会把笔记里字面量写的 &lt;i&gt;
+        # 显示成 <i>，与代码块路径（原样保留）不一致。
         if self._in_table:
-            self._current_cell += _restore_task_marks(unescape(data))
+            self._current_cell += _restore_task_marks(data)
             return
 
         # <li> 与内容之间的格式化空白（HTML 源码里的换行）不渲染，
@@ -472,8 +507,8 @@ class _MarkdownHTMLRenderer(HTMLParser):
             self._li_pending = False
             data = self._take_list_bullet(data)
 
-        # 普通文本：渲染
-        self._insert(unescape(data))
+        # 普通文本：渲染（同样不再二次 unescape，理由见上）
+        self._insert(data)
 
     # ── 辅助函数 ──
 
@@ -665,8 +700,12 @@ class _MarkdownHTMLRenderer(HTMLParser):
         except tk.TclError:
             pass
         w.window_create("end", window=holder, pady=6)
-        # 记录窗口在主 Text 中的位置：搜索时用于把代码块命中与正文命中
-        # 按文档顺序排序，并据此滚动定位
+        # 记录嵌入控件在主 Text 中的位置，供搜索时把代码块命中与正文命中
+        # 按文档顺序排序、并据此滚动定位。
+        # 注意：window_create 后窗口自身占一个字符位，end-1c 落在该窗口
+        # 之后的一个字符上，比窗口索引多一列。现有消费方（find_all_hits、
+        # ui.search._scroll_to_index）都只取行号，故无影响；若日后要按列
+        # 比较嵌入命中与正文命中的先后，此处需改用 end-2c。
         holder._code_index = w.index("end-1c")
         w.insert("end", "\n")
 
@@ -775,6 +814,9 @@ class _MarkdownHTMLRenderer(HTMLParser):
 
     def _insert_image(self, src, alt, title=""):
         """插入图片：按 _image_mode 决定「适应宽度」或「原始尺寸」"""
+        # 列表项以图片开头时，项目符号仍挂在 _li_pending 上；此处不补插
+        # 就会落到图片之后，形成一行孤立的符号。
+        self._flush_pending_bullet()
         path = self._resolve_image_path(src)
         if not path:
             self._insert(f"[图片：{alt or src}]",
@@ -931,7 +973,6 @@ class _MarkdownHTMLRenderer(HTMLParser):
         base = getattr(self.w, "_base_dir", None)
         if base:
             candidates.append(os.path.join(base, rel))
-        from file_handler import DATA_DIR
         candidates.append(os.path.join(DATA_DIR, rel))
         if os.path.isabs(src):
             candidates.append(src)
@@ -953,6 +994,13 @@ class _MarkdownHTMLRenderer(HTMLParser):
             if isinstance(self._stack[i], str) and self._stack[i] == name:
                 self._stack.pop(i)
                 return
+
+    def _clear_inline_stack(self):
+        """清掉行内样式与旧标题样式，保留 quote 这类外层块级样式。
+
+        块级元素相遇时用它代替 _stack.clear()：后者会把外层的 quote
+        一并清掉且不恢复，使引用块中标题之后的内容失去引用样式。"""
+        self._stack = [s for s in self._stack if s == 'quote']
 
     def _pop_anchor(self):
         """从样式栈中移除最近的 wikilink 或 extlink 样式"""
@@ -1082,7 +1130,9 @@ class _MarkdownHTMLRenderer(HTMLParser):
 
         self.w.insert("end", "\n")
         self.w.window_create("end", window=tree)
-        pos = self.w.index("end-1c")     # 表格窗口在主 Text 中的位置
+        # 记录表格窗口在主 Text 中的位置（end-1c 落在窗口后一个字符，
+        # 比窗口索引多一列；消费方只取行号，详见代码块处的说明）
+        pos = self.w.index("end-1c")
         self.w.insert("end", "\n")
 
         # 登记表格：Treeview 的文本同样不在主 Text 里，搜索时需单独查

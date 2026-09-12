@@ -6,7 +6,6 @@ IndeXar 主题应用
 """
 
 import tkinter as tk
-from tkinter import ttk
 
 import icon_renderer
 from theme_manager import VSCodeTheme
@@ -342,6 +341,10 @@ class ThemeMixin:
         self.new_note_btn._nb_hover_bg = c["sidebar_item_selected"]
         self.refresh_btn._nb_normal_bg = c["sidebar_header_bg"]
         self.refresh_btn._nb_hover_bg = c["sidebar_item_selected"]
+
+        # ── 仍打开的对话框跟随新主题 ──
+        # 面板的控件用构建期取的那一份 colors 上色，不刷新就会停在旧配色
+        self._recolor_dialogs()
 
     # ══════════════════════════════════
     # 面板切换

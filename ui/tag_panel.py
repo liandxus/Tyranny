@@ -9,9 +9,14 @@ import os
 import tkinter as tk
 from tkinter import ttk
 
-from file_handler import (get_tag_index, build_tag_index, intersect_tags,
-                          parse_front_matter_tags, set_note_tags)
-from ui.common import _add_hover_bg
+from file_handler import (
+    get_tag_index,
+    build_tag_index,
+    intersect_tags,
+    parse_front_matter_tags,
+    set_note_tags,
+    DATA_DIR,
+)
 
 
 class TagPanelMixin:
@@ -169,6 +174,7 @@ class TagPanelMixin:
         sep.pack(fill=tk.X)
         sep.bind("<Button-1>", lambda e: self._start_tags_drag(e, prefix))
         sep.bind("<B1-Motion>", lambda e: self._do_tags_drag(e, prefix))
+        sep.bind("<ButtonRelease-1>", lambda e: self._end_tags_drag())
         setattr(self, f"{prefix}tags_sep", sep)
 
         header = tk.Label(container,
@@ -223,6 +229,10 @@ class TagPanelMixin:
             "parent_h": parent.winfo_height(),
             "min_upper": 120 if prefix == "file_" else 160,
         }
+        # 拖动期间的写盘节流：B1-Motion 逐像素触发，每次都整体重写
+        # settings.json（截断后 json.dump，非原子），一次拖动会产生几十到
+        # 几百次磁盘写。改为拖动中不写，松手时统一写一次。
+        self._tags_drag_dirty = False
 
     def _do_tags_drag(self, event, prefix):
         if self._file_tags_collapsed:
@@ -237,7 +247,13 @@ class TagPanelMixin:
             ctr = getattr(self, f"{p}tags_container", None)
             if ctr:
                 ctr.configure(height=new_h)
-        self._save_settings()
+        self._tags_drag_dirty = True
+
+    def _end_tags_drag(self):
+        """拖动结束：把最终高度一次性写回配置"""
+        if getattr(self, "_tags_drag_dirty", False):
+            self._tags_drag_dirty = False
+            self._save_settings()
 
     def _toggle_file_tags(self):
         """折叠/展开所有'当前文件标签'区块"""
@@ -270,7 +286,6 @@ class TagPanelMixin:
         """刷新两个页面的'当前文件标签'列表"""
         tags = []
         if self._current_note_path:
-            from file_handler import parse_front_matter_tags, DATA_DIR
             filepath = os.path.join(DATA_DIR, f"{self._current_note_path}.md")
             tags = parse_front_matter_tags(filepath)
 
@@ -301,8 +316,6 @@ class TagPanelMixin:
         tag = tag.replace(",", " ").strip()
         if not tag:
             return
-        from file_handler import (parse_front_matter_tags, set_note_tags,
-                                  build_tag_index, DATA_DIR)
         filepath = os.path.join(DATA_DIR, f"{self._current_note_path}.md")
         cur = parse_front_matter_tags(filepath)
         if tag in cur:
@@ -326,7 +339,6 @@ class TagPanelMixin:
         tag_text = lb.get(sel[0]).strip()
         if tag_text in ("未打开文件", "无标签"):
             return
-        from file_handler import (parse_front_matter_tags, DATA_DIR)
         filepath = os.path.join(DATA_DIR, f"{self._current_note_path}.md")
         cur = parse_front_matter_tags(filepath)
         if tag_text not in cur:
@@ -337,7 +349,6 @@ class TagPanelMixin:
 
     def _apply_tag_change(self, rel_path, tags):
         """写回标签 → 重建索引 → 刷新两处列表与标签树"""
-        from file_handler import set_note_tags, build_tag_index
         new_tags = set_note_tags(rel_path, tags)
         if new_tags is None:
             self.status_left.configure(text="   写入标签失败")
@@ -345,7 +356,10 @@ class TagPanelMixin:
         build_tag_index()
         self._refresh_file_tags()
         self._refresh_tags()
-        self._snapshot_files()  # 抑制轮询自触发
+        # 只并入本次写过的这一篇，不再整体重拍：全量重拍会把并发的外部改动
+        # 一起记入快照，那一次轮询便检测不到，该笔记会停在「磁盘已更新、
+        # 索引未重建」的状态（窗口为外部保存到下一次轮询之间的 1.5 秒）。
+        self._snapshot_one_file(rel_path)
         summary = ", ".join(new_tags) if new_tags else "(无标签)"
         self.status_left.configure(text=f"   标签已更新：{summary}")
 
@@ -390,6 +404,7 @@ class TagPanelMixin:
         """重建标签树（从 index.json 缓存读取，不重新扫描）"""
         self.tag_tree.delete(*self.tag_tree.get_children())
         self.tag_intersection_label.configure(text="")
+        self._tag_file_seq = 0     # 文件节点 iid 的自增计数，每次重建归零
 
         tag_index = get_tag_index()
         if not tag_index:
@@ -415,7 +430,12 @@ class TagPanelMixin:
 
             for fpath in files:
                 name = fpath.split("/")[-1]
-                fid = f"file_{tag}_{fpath}"
+                # iid 用递增序号，不用 f"file_{tag}_{fpath}"：后者拼接不唯一，
+                # 标签 x + 路径 y_z 与标签 x_y + 路径 z 会得到同一个 iid，
+                # 重复 insert 抛 TclError 并中断整棵树的刷新。
+                # 路径本身由 values 携带，消费方不反解析 iid，故可安全改用序号。
+                fid = f"__tagf_{self._tag_file_seq}"
+                self._tag_file_seq += 1
                 self.tag_tree.insert(iid, "end", iid=fid,
                                      text=f"  {name}",
                                      values=(fpath,))

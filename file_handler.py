@@ -311,6 +311,11 @@ def rename_note(rel_path, new_title):
         counter += 1
 
     os.rename(old_full, new_full)
+
+    # 清除名称缓存，使内部链接能解析到重命名后的笔记名
+    global NOTE_NAME_MAP
+    NOTE_NAME_MAP = None
+
     return new_rel
 
 

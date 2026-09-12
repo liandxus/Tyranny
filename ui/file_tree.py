@@ -17,9 +17,16 @@ from tkinter import ttk, messagebox
 
 import icon_renderer
 from context_menu import ContextMenu
-from file_handler import (list_notes_tree, create_note, make_subdir,
-                          rename_note, rename_folder, delete_note,
-                          delete_folder)
+from file_handler import (
+    list_notes_tree,
+    make_subdir,
+    rename_note,
+    rename_folder,
+    delete_note,
+    delete_folder,
+    DATA_DIR,
+    move_item,
+)
 from ui.common import _add_hover_bg
 
 
@@ -323,7 +330,6 @@ class FileTreeMixin:
 
     def _tree_context_new_folder(self):
         """右键 → 新建文件夹"""
-        from file_handler import make_subdir
         parent = self._get_tree_context_dir()
 
         dialog = self._make_dialog(self.root, "新建文件夹", 380, 180)
@@ -368,7 +374,6 @@ class FileTreeMixin:
             return
         iid, is_dir = vals[0], vals[1]
         is_dir = (is_dir == "True" or is_dir is True)
-        from file_handler import rename_note, rename_folder
 
         old_name = os.path.basename(iid)
         item_type = "文件夹" if is_dir else "笔记"
@@ -401,7 +406,8 @@ class FileTreeMixin:
                     rename_note(iid, new_name)
                 dialog.destroy()
                 self._refresh_file_tree()
-                self._snapshot_files()  # 抑制轮询自触发
+                self._snapshot_files()      # 抑制轮询自触发
+                self._rebuild_indexes()     # 名称映射与索引随路径变更重建
 
         tk.Button(btn_frame, text="确认", font=("Microsoft YaHei", 9),
                   command=do_rename).pack(side=tk.RIGHT)
@@ -467,7 +473,6 @@ class FileTreeMixin:
         if not messagebox.askyesno(title, msg):
             return
 
-        from file_handler import delete_folder, delete_note
         for path, is_dir in items:
             if is_dir:
                 delete_folder(path)
@@ -492,7 +497,6 @@ class FileTreeMixin:
             return
 
         from tkinter import filedialog
-        from file_handler import DATA_DIR, move_item
 
         abs_dir = filedialog.askdirectory(
             parent=self.root, title="选择目标文件夹",
@@ -532,7 +536,6 @@ class FileTreeMixin:
         if not vals:
             return
         iid, is_dir = vals[0], vals[1]
-        from file_handler import DATA_DIR
         if is_dir == "True" or is_dir is True:
             target = os.path.join(DATA_DIR, iid)
         else:
@@ -546,7 +549,6 @@ class FileTreeMixin:
         if not self._current_note_path:
             self.status_left.configure(text="   请先打开一篇笔记")
             return
-        from file_handler import DATA_DIR
         filepath = os.path.join(DATA_DIR, f"{self._current_note_path}.md")
         if not os.path.exists(filepath):
             self.status_left.configure(text="   找不到笔记文件")
@@ -565,7 +567,6 @@ class FileTreeMixin:
                 self.status_left.configure(text="   文件夹不能用编辑器打开")
                 return  # 跳过文件夹
             iid = vals[0]
-            from file_handler import DATA_DIR
             filepath = os.path.join(DATA_DIR, f"{iid}.md")
             if not os.path.exists(filepath):
                 self.status_left.configure(text="   找不到笔记文件")

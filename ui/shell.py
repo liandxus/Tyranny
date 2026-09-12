@@ -8,10 +8,10 @@ IndeXar 外壳界面
 import os
 import subprocess
 import tkinter as tk
-from tkinter import ttk
 
 import icon_renderer
 from context_menu import ContextMenu
+from file_handler import DATA_DIR
 from ui.common import _add_hover_bg
 
 
@@ -88,8 +88,6 @@ class ShellMixin:
         menu.show(x, y, items, use_grab=False)
 
     def _open_in_explorer(self):
-        import subprocess
-        from file_handler import DATA_DIR
         subprocess.run(["explorer", os.path.normpath(DATA_DIR)])
 
     def _get_menu_colors(self):

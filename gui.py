@@ -4,25 +4,21 @@ VS Code 风格 + 自定义无边框标题栏 + 亮/暗主题切换
 """
 
 import tkinter as tk
-from tkinter import ttk, messagebox
-import ctypes
-import json
+from tkinter import ttk
 import os
-import re
-from file_handler import (list_notes, list_notes_tree, read_note, get_tag_index,
-                          build_tag_index, build_backlink_index, intersect_tags,
-                          invalidate_name_map)
+from file_handler import (
+    read_note,
+    build_tag_index,
+    build_backlink_index,
+    invalidate_name_map,
+    collect_mtimes,
+    DATA_DIR,
+)
 from theme_manager import VSCodeTheme
-from editor_detect import detect_editors
-import search_engine
-import icon_renderer
-from context_menu import ContextMenu
 
 import config
-from config import SETTINGS_FILE  # 路径由 config 模块统一持有
 
-from ui.common import (SEARCH_HIT_COLOR, SEARCH_HIT_ALPHA, ASSETS_DIR,
-                       _add_hover_bg, _blend_hex, _readable_fg)
+from ui.common import ASSETS_DIR
 from ui.content_view import ContentViewMixin
 from ui.dialogs import DialogsMixin
 from ui.file_tree import FileTreeMixin
@@ -317,9 +313,23 @@ class IndeXarApp(TitleBarMixin, FileTreeMixin, TagPanelMixin,
     def _snapshot_files(self):
         """重建 mtime 快照（程序自身写文件后调用，抑制自触发）"""
         try:
-            from file_handler import collect_mtimes
             self._file_snapshots = collect_mtimes()
         except Exception:
+            pass
+
+    def _snapshot_one_file(self, rel_path):
+        """只把本次由程序写过的那个文件并入快照。
+
+        与 _snapshot_files 的差别在于不会顺带吞掉并发的外部改动：
+        整体重拍会把别人刚保存的 mtime 一并记入快照，那一轮轮询就检测不到，
+        该笔记便停留在「磁盘已更新但索引未重建」的状态。"""
+        if not rel_path or not isinstance(
+                getattr(self, "_file_snapshots", None), dict):
+            return
+        try:
+            full = os.path.join(DATA_DIR, f"{rel_path.replace('/', os.sep)}.md")
+            self._file_snapshots[rel_path] = os.path.getmtime(full)
+        except OSError:
             pass
 
     def _watch_data_dir(self):
@@ -330,7 +340,6 @@ class IndeXarApp(TitleBarMixin, FileTreeMixin, TagPanelMixin,
             self.root.after(800, self._watch_data_dir)
             return
         try:
-            from file_handler import collect_mtimes
             current = collect_mtimes()
         except Exception:
             self.root.after(1500, self._watch_data_dir)
@@ -342,17 +351,25 @@ class IndeXarApp(TitleBarMixin, FileTreeMixin, TagPanelMixin,
                     if p in old and current[p] != old[p]]
         self._file_snapshots = current
 
-        if added or removed:
-            if self.current_panel == "files":
-                self._refresh_file_tree()
-            if self._current_note_path in removed:
-                self._close_file()
-        if added or modified:
-            self._rebuild_indexes()
+        # 本方法由 after() 单次调度，续期语句一旦被异常跳过，轮询就永久停摆且
+        # 界面上毫无提示。因此从刷新到重建的全部动作都纳入 try，续期置于 finally。
+        try:
+            if added or removed:
+                if self.current_panel == "files":
+                    self._refresh_file_tree()
+                if self._current_note_path in removed:
+                    self._close_file()
+            # 删除同样会使索引失效（标签索引按路径记录、反向链接按笔记名记录），
+            # 故重建条件包含 removed，避免索引残留已不存在的笔记。
+            if added or removed or modified:
+                self._rebuild_indexes()
             if (self._current_note_path and
                     self._current_note_path in (added + modified)):
                 self._rerender_current_note()
-        self.root.after(1500, self._watch_data_dir)
+        except Exception:
+            pass
+        finally:
+            self.root.after(1500, self._watch_data_dir)
 
     def _rebuild_indexes(self):
         """节流重建标签与反向链接索引并刷新标签区"""
