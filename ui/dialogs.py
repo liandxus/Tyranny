@@ -617,7 +617,12 @@ class DialogsMixin:
         """登记单例面板并显示：先设任务栏样式再显示，销毁时自动清引用
 
         面板创建时先 withdraw，此处设完样式才 deiconify：外壳建立任务栏
-        按钮时样式已正确，因此不闪烁。"""
+        按钮时样式已正确，因此不闪烁。
+
+        deiconify 之后必须再跑一轮 update()：Tk 在窗口未被映射时不计算子控件
+        几何，所以 withdraw 期间的 update_idletasks() 只能定下窗口外框，内部
+        控件仍是 1x1。若就此显示，用户看到的是左上角一小块，要拖动窗口才
+        补全。映射后 update() 会立即完成布局，窗口一出现即完整。"""
         setattr(self, attr, dialog)
 
         def _on_destroy(event=None):
@@ -630,6 +635,7 @@ class DialogsMixin:
         dialog.bind("<Destroy>", _on_destroy)
         ok = set_appwindow_style(dialog)
         dialog.deiconify()
+        dialog.update()          # 映射后强制完成内部布局（见 docstring）
         dialog.lift()
         if not ok:
             # 句柄尚未就绪时的兜底：显示后强制重建（会闪一下）
