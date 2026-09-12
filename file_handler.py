@@ -765,19 +765,125 @@ def intersect_tags(tag_names, tag_index=None):
 # 反向链接系统
 # ══════════════════════════════════
 
-def parse_wikilinks(content):
-    """从笔记正文中提取 [[目标]] 链接的目标名列表
+# 站内链接的两种写法放在一个正则里，使匹配结果天然按出现顺序排列：
+#   [[目标]] / [[目标|显示文字]]，以及标准链接 [显示文字](目标 "标题")
+# 标准链接分支用 (?<!!) 排除图片 ![替代文字](图片)
+_NOTE_LINK_RE = re.compile(
+    r'\[\[([^\[\]|]+)(?:\|([^\[\]]+))?\]\]'
+    r'|(?<!!)\[([^\[\]]*)\]\(\s*<?([^()<>\s]+)>?(?:\s+["\'][^"\']*["\'])?\s*\)'
+)
 
-    同一目标在单篇笔记中被重复引用时只记一次（保持首次出现的顺序），
-    这样反向链接索引里每个来源笔记只会出现一条。
+
+def looks_like_note_target(href):
+    """判断非协议链接是否指向站内笔记：结尾为 .md，或整段没有扩展名
+
+    渲染时的跳转判定与反向索引共用此函数，使"能跳转但不进反链"
+    这类两处规则不一致的情况不会出现。"""
+    h = (href or "").split("#")[0].split("?")[0].strip()
+    if not h or h.startswith(("#", "mailto:", "javascript:", "data:")):
+        return False
+    tail = h.replace("\\", "/").rstrip("/").split("/")[-1]
+    if not tail:
+        return False
+    if "." not in tail:
+        return True
+    return tail.lower().endswith(".md")
+
+
+def note_name_from_href(href):
+    """从链接地址中取出笔记名：./a/b.md → b
+
+    索引与跳转都以笔记名为准（见 find_note_by_name），故带路径的写法
+    在此统一归到末段名称上。"""
+    h = (href or "").split("#")[0].split("?")[0]
+    tail = h.replace("\\", "/").rstrip("/").split("/")[-1]
+    return re.sub(r"\.md$", "", tail, flags=re.I)
+
+
+# 行内代码：`...`（含以多个反引号包裹的情形）
+_INLINE_CODE_RE = re.compile(r'`+[^`\n]*`+')
+
+
+def _placeholder(parts, segment):
+    """把一段原文换成一个占位符，并将原文存入 parts 供之后还原"""
+    parts.append(segment)
+    return f"\x00{len(parts) - 1}\x00"
+
+
+def _mask_fences(text):
+    """按行扫描围栏代码块，整体换成占位符；未闭合时其后全部视为代码
+
+    围栏规则与 Markdown 一致：以 ``` 或 ~~~ 起止。返回 (替换后的文本, 片段表)。
+    """
+    parts, out, buf, in_fence = [], [], [], False
+    for line in text.splitlines(keepends=True):
+        if line.lstrip().startswith(("```", "~~~")):
+            if in_fence:
+                buf.append(line)
+                out.append(_placeholder(parts, "".join(buf)))
+                buf, in_fence = [], False
+            else:
+                in_fence = True
+                buf.append(line)
+            continue
+        (buf if in_fence else out).append(line)
+    if buf:                       # 未闭合的围栏：其后内容按 Markdown 规则同属代码
+        out.append(_placeholder(parts, "".join(buf)))
+    return "".join(out), parts
+
+
+def mask_code_regions(text):
+    """把代码区（围栏代码块与行内代码）换成占位符，返回 (文本, 还原函数)
+
+    供渲染前的文本改写使用：代码示例中的 [[...]] 不应被改写成链接，
+    否则代码块的显示内容与复制结果都会被破坏。"""
+    masked, parts = _mask_fences(text or "")
+    masked = _INLINE_CODE_RE.sub(
+        lambda m: _placeholder(parts, m.group(0)), masked)
+
+    def restore(s):
+        for i, seg in enumerate(parts):
+            s = s.replace(f"\x00{i}\x00", seg)
+        return s
+
+    return masked, restore
+
+
+def strip_code_regions(text):
+    """去掉代码区，只留正文，供反向索引判断哪些链接是真引用
+
+    笔记中常以行内代码举出链接写法（如 `[文字](笔记名)`），这类示例
+    若一并计入，会给目标笔记带来并不存在的反向链接。"""
+    masked, _parts = mask_code_regions(text)
+    return re.sub(r"\x00\d+\x00", " ", masked)
+
+
+def parse_note_links(content):
+    """提取正文中全部站内链接的目标笔记名（去重，保持首次出现的顺序）
+
+    两种写法一并计入：双括号 [[目标]] / [[目标|显示文字]]，以及标准链接
+    [显示文字](目标.md)。后者需与网页链接区分，判定规则与渲染跳转所用
+    的 looks_like_note_target 相同，故"点得进去的"与"进得了反链的"一致。
     """
     links = []
     seen = set()
-    for m in re.finditer(r'\[\[([^\[\]|]+)(?:\|([^\[\]]+))?\]\]', content):
-        target = m.group(1).strip().replace(".md", "")
-        if target and target not in seen:
-            seen.add(target)
-            links.append(target)
+    content = strip_code_regions(content)      # 代码区中的写法多为示例，不计入
+
+    def _add(name):
+        name = note_name_from_href((name or "").strip())
+        if name and name not in seen:
+            seen.add(name)
+            links.append(name)
+
+    for m in _NOTE_LINK_RE.finditer(content):
+        if m.group(1) is not None:            # 双括号写法：目标在 group(1)
+            _add(m.group(1))
+            continue
+        href = m.group(4)                     # 标准链接：目标在 group(4)
+        if href.startswith(("http://", "https://", "wikilink:", "mailto:")):
+            continue
+        if looks_like_note_target(href):
+            _add(href)
     return links
 
 
@@ -797,7 +903,7 @@ def build_backlink_index():
             end = content.find("---", 3)
             if end != -1:
                 content = content[end + 3:]
-        for target in parse_wikilinks(content):
+        for target in parse_note_links(content):
             refs = backlinks.setdefault(target, [])
             # 同一引用者只记录一次（防御路径重复/大小写差异）
             if item["path"] not in refs:

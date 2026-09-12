@@ -14,6 +14,12 @@ from tkinter import ttk
 
 import markdown
 
+# 站内链接的判定、取名与代码区识别与反向索引共用（见 file_handler），
+# 两处若各写一套，就会出现"能跳转却不进反链"这类不一致
+from file_handler import (looks_like_note_target as _looks_like_note_target,
+                          note_name_from_href as _note_name_from_href,
+                          mask_code_regions as _mask_code_regions)
+
 # ── 语法高亮（可选依赖）：缺失时代码块退化为纯文本，不影响其它渲染 ──
 try:
     from pygments import lex as _pyg_lex
@@ -191,36 +197,20 @@ def _preprocess_task_lists(text):
     return "\n".join(out)
 
 
-def _looks_like_note_target(href):
-    """判断非协议链接是否指向站内笔记：结尾为 .md，或整段没有扩展名"""
-    h = (href or "").split("#")[0].split("?")[0].strip()
-    if not h or h.startswith(("#", "mailto:", "javascript:", "data:")):
-        return False
-    tail = h.replace("\\", "/").rstrip("/").split("/")[-1]
-    if not tail:
-        return False
-    if "." not in tail:
-        return True
-    return tail.lower().endswith(".md")
-
-
-def _note_name_from_href(href):
-    """从链接地址中取出笔记名：./a/b.md → b"""
-    h = (href or "").split("#")[0].split("?")[0]
-    tail = h.replace("\\", "/").rstrip("/").split("/")[-1]
-    return re.sub(r"\.md$", "", tail, flags=re.I)
-
-
 def _preprocess_wikilinks(text):
     """将 [[target]] 和 [[target|display]] 转为标准 Markdown 链接，
-       使用 wikilink: 协议前缀标记内部链接，供后续渲染时识别。"""
-    # 先保护已存在的标准链接和图片语法，避免误匹配
+       使用 wikilink: 协议前缀标记内部链接，供后续渲染时识别。
+
+       行内代码与围栏代码块内的写法不作改写：那里的双括号多是语法示例，
+       一并改写会连代码块的显示内容与复制结果一起破坏。"""
     def _replace(m):
         target = m.group(1).strip()
         display = m.group(2).strip() if m.group(2) else target
         return f'[{display}](wikilink:{target})'
 
-    return re.sub(r'\[\[([^\[\]|]+)(?:\|([^\[\]]+))?\]\]', _replace, text)
+    masked, restore = _mask_code_regions(text)
+    return restore(re.sub(r'\[\[([^\[\]|]+)(?:\|([^\[\]]+))?\]\]',
+                          _replace, masked))
 
 
 # ══════════════════════════════════
