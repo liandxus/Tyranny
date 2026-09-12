@@ -10,25 +10,37 @@ import os
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-import icon_renderer
 from editor_detect import detect_editors
-from file_handler import create_note, make_subdir, list_notes_tree
+from file_handler import (
+    create_note,
+    make_subdir,
+    list_notes_tree,
+)
 from theme_manager import VSCodeTheme
-from ui.common import (_add_hover_bg, enable_window_resize,
+from ui.common import (enable_window_resize,
                        set_appwindow_style, force_appwindow_style,
                        ensure_alt_tab, show_and_focus)
 
 
-def _select_help_section(dialog, title):
-    """已打开的帮助窗口按小节名切换内容（重复打开且带分类参数时才用到）"""
+def _select_help_section(dialog, target):
+    """已打开的帮助窗口按小节切换内容（重建面板后恢复位置时使用）
+
+    target 可以是 (分类, 小节名) 元组，也可以只给小节名字符串。
+    分类之间有小节同名（「表格」「代码块」在「操作指南」与「笔记格式」
+    下各有一份），给出分类时才不会选错。"""
     picker = getattr(dialog, "_help_select", None)
     if not picker:
         return
     sections, select = picker
-    for subs in sections.values():
+    cat, title = target if isinstance(target, tuple) else (None, target)
+    if title is None:
+        return
+    for c_name, subs in sections.items():
+        if cat is not None and c_name != cat:
+            continue
         for name, items in subs:
             if name == title:
-                select(name, items)
+                select(c_name, name, items)
                 return
 
 
@@ -70,13 +82,16 @@ class DialogsMixin:
                   command=dialog.destroy).pack(side=tk.RIGHT)
         entry.bind("<Return>", lambda e: ok())
         entry.bind("<Escape>", lambda e: dialog.destroy())
+        # 上面那次 _theme_dialog_body 是在 body 及其中控件创建之前调用的，
+        # 其内部遍历看不到它们（按钮因此保持 Tk 默认外观）。控件齐了再着色
+        # 一次；只着色不重复定位，避免 focus_force 把输入框的焦点抢走。
+        self._paint_dialog(dialog)
         dialog.wait_window()
         return result[0]
 
 
     def _create_note(self, default_dir=""):
         """弹出新建笔记对话框"""
-        from file_handler import get_all_subdirs, create_note
 
         dialog = self._make_dialog(self.root, "新建笔记", 400, 240)
 
@@ -90,7 +105,6 @@ class DialogsMixin:
         title_entry = tk.Entry(frame, textvariable=title_var,
                                 font=("Microsoft YaHei", 10), relief=tk.SUNKEN)
         title_entry.pack(fill=tk.X, pady=(0, 12))
-        title_entry.focus_set()
 
         # 存放目录
         tk.Label(frame, text="存放目录：", anchor=tk.W,
@@ -106,8 +120,9 @@ class DialogsMixin:
         dir_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
         browse_btn = tk.Button(dir_frame, text="浏览…",
                                font=("Microsoft YaHei", 9),
+                               # 传当前值而非 default_dir，理由同 _create_folder
                                command=lambda: self._select_dir_dialog(
-                                   dialog, dir_var, default_dir))
+                                   dialog, dir_var, dir_var.get()))
         browse_btn.pack(side=tk.RIGHT, padx=(10, 0))
 
         # 按钮行
@@ -118,9 +133,20 @@ class DialogsMixin:
             title = title_var.get().strip()
             if not title:
                 return
+            ok_name, err = self._check_note_name(title)
+            if not ok_name:
+                messagebox.showwarning("名称不可用", err, parent=dialog)
+                return
             subdir_raw = dir_var.get()
             subdir = "" if subdir_raw == "(根目录)" else subdir_raw
-            rel_path = create_note(title, subdir)
+            try:
+                rel_path = create_note(title, subdir)
+            except (OSError, ValueError) as exc:
+                # create_note 内的 open() 没有兜底；异常若穿出 Tk 回调，
+                # 只会打印到 stderr，打包后无控制台，用户看到的是「点了没反应」
+                messagebox.showwarning("创建失败",
+                                       f"无法创建笔记：{exc}", parent=dialog)
+                return
             if rel_path:
                 dialog.destroy()
                 self._refresh_file_tree()
@@ -136,6 +162,30 @@ class DialogsMixin:
 
         title_entry.bind("<Return>", lambda e: do_create())
         self._theme_dialog_body(dialog)
+        # 焦点必须晚于 _theme_dialog_body 的 focus_force 再设置，
+        # 否则会被窗口抢走，用户还得点一下输入框才能输入
+        title_entry.focus_set()
+
+    def _check_note_name(self, title):
+        """校验用户输入的笔记/文件夹名，返回 (是否可用, 原因)。
+
+        file_handler 会把 \\/:*?"<>| 替换成下划线，但不会处理长度、纯点号
+        这类情形：超长名会让 open() 抛 OSError，名字若只剩点号会生成
+        「..md」这样的隐藏文件，被 _walk 过滤掉，笔记建了却永远不出现在
+        文件树与索引里。这里提前拦住，给出可读的提示。"""
+        if not title:
+            return False, "名称不能为空。"
+        # 名称里的非法字符会被替换掉，若替换后什么都不剩（如全由非法字符组成）
+        import re as _re
+        safe = _re.sub(r'[\\/:*?"<>|]', "_", title).strip(" .")
+        if not safe:
+            return False, "名称至少需要包含一个可用的字符。"
+        # Windows 单个路径分量上限 255，留出 ".md" 与可能的去重编号空间
+        if len(safe) > 120:
+            return False, f"名称过长（{len(safe)} 个字符），请控制在 120 个字符以内。"
+        if safe in (".", ".."):
+            return False, "名称不能是“.”或“..”。"
+        return True, ""
 
     def _make_dialog(self, parent, title, width, height):
         """创建无边框对话框，带自定义标题栏"""
@@ -184,9 +234,30 @@ class DialogsMixin:
 
         return win
 
-    def _theme_dialog_body(self, win):
-        """对对话框内部所有控件应用主题色 + 定位（在所有控件添加完成后调用）"""
+    def _paint_dialog(self, win):
+        """按当前主题给对话框（标题栏 + 内部控件）上色，不含定位与 grab。
+
+        与 _theme_dialog_body 分开，是为了主题切换时能只重着色、
+        不重新居中、不重复 grab_set（后者会把已拖走的窗口拽回屏幕中央）。"""
         c = self.colors
+
+        # ── 标题栏（其配色在 _make_dialog 里设过一次，需一并更新）──
+        bar = getattr(win, '_titlebar', None)
+        if bar is not None:
+            try:
+                bar.configure(bg=c["toolbar_bg"])
+                for child in bar.winfo_children():
+                    if isinstance(child, tk.Label):
+                        child.configure(bg=c["toolbar_bg"], fg=c["toolbar_fg"])
+                    elif isinstance(child, tk.Button):
+                        child.configure(
+                            bg=c["toolbar_bg"], fg=c["toolbar_fg"],
+                            activebackground=("#e81123"
+                                              if self.theme_mode == "light"
+                                              else "#c03333"),
+                            activeforeground="#ffffff")
+            except tk.TclError:
+                pass
 
         def _recurse(widget):
             if widget is getattr(win, '_titlebar', None):
@@ -236,6 +307,12 @@ class DialogsMixin:
         border_c = "#555555" if self.theme_mode == "dark" else "#777777"
         win.configure(highlightthickness=1, highlightbackground=border_c,
                       highlightcolor=border_c)
+
+    def _theme_dialog_body(self, win):
+        """对对话框内部所有控件应用主题色 + 定位（在所有控件添加完成后调用）"""
+        self._paint_dialog(win)
+        # 主题切换时只重着色，不重新居中、不重复 grab
+        self._register_recolor(win, lambda: self._paint_dialog(win))
 
         # ── 屏幕居中：grab 后 geometry + MoveWindow 覆盖 ──
         w = getattr(win, '_dialog_width', 400)
@@ -300,7 +377,6 @@ class DialogsMixin:
 
     def _select_dir_dialog(self, parent_win, result_var, current_dir=""):
         """弹出树状目录选择对话框，完全手动构建避免 grab/position 冲突"""
-        from file_handler import list_notes_tree
 
         c = self.colors
         W, H = 380, 450
@@ -377,12 +453,27 @@ class DialogsMixin:
         if tree_data:
             _populate(root_iid, tree_data)
         if current_dir:
-            for item in tree.get_children(root_iid):
-                vals = tree.item(item, "values")
-                if vals and vals[0] == current_dir:
-                    tree.selection_set(item)
-                    tree.see(item)
-                    break
+            # 递归查找：此前只遍历根层的一级目录，A/B 这类子目录永远匹配不上，
+            # 「预选上次目录」实际只在根层目录上生效。顺带展开沿途的父节点，
+            # 否则 see() 只能滚到一个折叠中看不见的节点。
+            found = [None]
+
+            def _locate(parent_iid, trail):
+                for item in tree.get_children(parent_iid):
+                    vals = tree.item(item, "values")
+                    if vals and vals[0] == current_dir:
+                        found[0] = (item, trail)
+                        return True
+                    if _locate(item, trail + [item]):
+                        return True
+                return False
+
+            if _locate(root_iid, []):
+                node, trail = found[0]
+                for anc in trail:
+                    tree.item(anc, open=True)
+                tree.selection_set(node)
+                tree.see(node)
 
         # 按钮
         btn_frame = tk.Frame(dialog, bg=c["sidebar_bg"], bd=0, highlightthickness=0)
@@ -436,7 +527,6 @@ class DialogsMixin:
 
     def _create_folder(self, default_dir=""):
         """弹出新建文件夹对话框（含目录选择）"""
-        from file_handler import make_subdir, get_all_subdirs
 
         dialog = self._make_dialog(self.root, "新建文件夹", 400, 250)
 
@@ -457,8 +547,11 @@ class DialogsMixin:
         dir_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
         browse_btn = tk.Button(dir_frame, text="浏览…",
                                font=("Microsoft YaHei", 9),
+                               # 传当前值而非 default_dir：后者是对话框打开时的
+                               # 初值，用户改过之后它不再代表当前选择，
+                               # 再点「浏览…」就会预选错目录
                                command=lambda: self._select_dir_dialog(
-                                   dialog, parent_var, default_dir))
+                                   dialog, parent_var, parent_var.get()))
         browse_btn.pack(side=tk.RIGHT, padx=(10, 0))
 
         # 文件夹名称
@@ -468,8 +561,6 @@ class DialogsMixin:
         entry = tk.Entry(frame, textvariable=name_var,
                           font=("Microsoft YaHei", 10), relief=tk.SUNKEN)
         entry.pack(fill=tk.X, pady=(0, 14))
-        entry.select_range(0, tk.END)
-        entry.focus_set()
 
         btn_frame = tk.Frame(frame)
         btn_frame.pack(fill=tk.X)
@@ -477,9 +568,19 @@ class DialogsMixin:
         def do_create():
             name = name_var.get().strip()
             if name:
+                ok_name, err = self._check_note_name(name)
+                if not ok_name:
+                    messagebox.showwarning("名称不可用", err, parent=dialog)
+                    return
                 raw = parent_var.get()
                 parent = "" if raw == "(根目录)" else raw
-                make_subdir(parent, name)
+                try:
+                    make_subdir(parent, name)
+                except (OSError, ValueError) as exc:
+                    messagebox.showwarning("创建失败",
+                                           f"无法创建文件夹：{exc}",
+                                           parent=dialog)
+                    return
                 dialog.destroy()
                 self._refresh_file_tree()
 
@@ -489,6 +590,9 @@ class DialogsMixin:
                   command=do_create).pack(side=tk.RIGHT)
         entry.bind("<Return>", lambda e: do_create())
         self._theme_dialog_body(dialog)
+        # 焦点与全选放在 _theme_dialog_body 之后，理由同 _create_note
+        entry.focus_set()
+        entry.select_range(0, tk.END)
 
 
     def _bring_to_front(self, attr):
@@ -530,6 +634,108 @@ class DialogsMixin:
         if not ok:
             # 句柄尚未就绪时的兜底：显示后强制重建（会闪一下）
             dialog.after(120, lambda: force_appwindow_style(dialog))
+
+    # ── 对话框主题刷新 ──
+
+    def _register_recolor(self, dialog, fn):
+        """登记某个对话框的「按当前主题重新着色」回调。
+
+        面板的控件都用构建期取的那一份 self.colors 上色，主题切换后
+        不会自己更新。这里把重着色动作挂在窗口对象上，由 _apply_theme
+        在切主题时统一调用（见 _recolor_dialogs）。"""
+        try:
+            dialog._recolor = fn
+        except Exception:
+            pass
+
+    def _dialog_alive(self, attr):
+        """取出仍存在的单例面板；已销毁则清引用并返回 None"""
+        dlg = getattr(self, attr, None)
+        if dlg is None:
+            return None
+        try:
+            if not dlg.winfo_exists():
+                setattr(self, attr, None)
+                return None
+        except tk.TclError:
+            setattr(self, attr, None)
+            return None
+        return dlg
+
+    def _recolor_dialogs(self):
+        """主题切换后让仍打开的对话框跟上新配色（由 _apply_theme 调用）
+
+        走 _theme_dialog_body 的小对话框已注册 _paint_dialog，可就地重着色。
+
+        帮助/设置/字号三个面板不适用就地重着色：它们的配色写在各自的构建
+        过程里（left_bg、code_bg、border 等按 is_dark 现算，并不是 colors
+        字典里的键），逐控件还原容易画错。故改为按当前主题重建，并记住
+        正在看的分类/小节。
+
+        重建经 after_idle 推迟：设置面板里就有切换主题的控件，此刻正在执行
+        的正是它自己的回调，不能当场把该控件销毁掉。
+        """
+        # 小对话框：就地重着色
+        for attr in ("_tag_input_dialog", "_dir_dialog"):
+            dlg = self._dialog_alive(attr)
+            if dlg is None:
+                continue
+            fn = getattr(dlg, "_recolor", None)
+            if fn is None:
+                continue
+            try:
+                fn()
+            except Exception:
+                pass
+
+        # 三个大面板：记录「重建后如何回到当前位置」，稍后重建
+        plan = []
+        dlg = self._dialog_alive("_help_dialog")
+        if dlg is not None:
+            section = getattr(dlg, "_section", None)
+            plan.append(("_help_dialog", "_open_help",
+                         (lambda d, s=section: _select_help_section(d, s))
+                         if section else None))
+        dlg = self._dialog_alive("_settings_dialog")
+        if dlg is not None:
+            cat = getattr(dlg, "_category", None)
+            plan.append(("_settings_dialog", "_open_settings",
+                         (lambda d, n=cat: d._select_category(n))
+                         if cat else None))
+        if self._dialog_alive("_font_dialog") is not None:
+            plan.append(("_font_dialog", "_open_font_dialog", None))
+        if not plan:
+            return
+
+        def _rebuild():
+            for attr, opener_name, restore in plan:
+                # 推迟期间用户可能已把它关掉；关掉就不再重开
+                if self._dialog_alive(attr) is None:
+                    continue
+                try:
+                    self._dialog_alive(attr).destroy()
+                except (tk.TclError, AttributeError):
+                    pass
+                setattr(self, attr, None)
+                opener = getattr(self, opener_name, None)
+                if opener is None:
+                    continue
+                try:
+                    opener()
+                except Exception:
+                    continue
+                if restore is not None:
+                    new = self._dialog_alive(attr)
+                    if new is not None:
+                        try:
+                            restore(new)
+                        except Exception:
+                            pass
+
+        try:
+            self.root.after_idle(_rebuild)
+        except Exception:
+            pass
 
     def _open_help(self, category=None):
         """打开帮助面板（左分类 + 右内容，可拖动分隔）
@@ -847,6 +1053,11 @@ class DialogsMixin:
             nav_canvas.yview_scroll(-int(e.delta / 120) or -1, "units")
             return "break"
 
+        # Tk 的事件只按 bindtags 派发（widget → class → toplevel → all），
+        # 不会传给父控件。左栏的分类头与小节名都是铺满整栏的 Label，鼠标停在
+        # 它们上面时事件落在 Label 上，只绑 nav_canvas / nav_inner 收不到，
+        # 于是左栏滚不动。故在下面创建每个 Label 时一并绑定 _nav_wheel
+        # （不用 bind_all：那是全局绑定，窗口销毁后仍会残留）。
         for _w in (nav_canvas, nav_inner):
             _w.bind("<MouseWheel>", _nav_wheel)
 
@@ -870,7 +1081,9 @@ class DialogsMixin:
                            spacing1=6, spacing3=6,
                            lmargin1=10, lmargin2=10)
 
-        def _render(title, items):
+        def _render(title, items, cat=None):
+            # 记下当前分类与小节：主题切换后据此重建面板，回到同一节
+            dialog._section = (cat, title) if cat else title
             text.configure(state=tk.NORMAL)
             text.delete("1.0", "end")
             text.insert("end", title + "\n", "h")
@@ -880,7 +1093,7 @@ class DialogsMixin:
             text.yview_moveto(0)
 
         # ── 左侧层级：分类（可折叠） → 小节 ──
-        sub_labels = []    # [(小节标题, 内容, Label)]
+        sub_labels = []    # [(分类名, 小节标题, 内容, Label)]
         cat_rows = []      # [(分类名, 表头 Label, 小节容器 Frame)]
         folded = set()     # 已折叠的分类
 
@@ -901,11 +1114,14 @@ class DialogsMixin:
                 folded.add(cat)
             _refresh_fold()
 
-        def _select(title, items):
-            for t, _i, lbl in sub_labels:
-                lbl.configure(bg=c["toolbar_btn_hover"] if t == title
-                              else left_bg)
-            _render(title, items)
+        def _select(cat, title, items):
+            # 用「分类 + 小节名」作键：分类之间有小节同名（「操作指南」与
+            # 「笔记格式」下都有「表格」「代码块」），只按标题匹配会把两处
+            # 同时点亮，也分不清当前内容属于哪个分类。
+            for c_name, t, _i, lbl in sub_labels:
+                lbl.configure(bg=c["toolbar_btn_hover"]
+                              if (c_name, t) == (cat, title) else left_bg)
+            _render(title, items, cat)
 
         # 供重复打开时按小节名切换内容（_select_help_section 取用）
         dialog._help_select = (sections, _select)
@@ -918,6 +1134,7 @@ class DialogsMixin:
                             bg=left_bg, fg=c["sidebar_fg"], pady=6)
             head.pack(fill=tk.X)
             head.bind("<Button-1>", lambda e, cat=cat: _toggle(cat))
+            head.bind("<MouseWheel>", _nav_wheel)
             sub = tk.Frame(holder, bg=left_bg)
             sub.pack(fill=tk.X)
 
@@ -928,14 +1145,15 @@ class DialogsMixin:
                                cursor="hand2")
                 lbl.pack(fill=tk.X)
                 lbl.bind("<Button-1>",
-                         lambda e, t=title, i=items: _select(t, i))
-                sub_labels.append((title, items, lbl))
+                         lambda e, ct=cat, t=title, i=items: _select(ct, t, i))
+                lbl.bind("<MouseWheel>", _nav_wheel)
+                sub_labels.append((cat, title, items, lbl))
 
             cat_rows.append((cat, head, sub))
 
         _refresh_fold()
 
-        # 初始定位：优先命中 category，否则第一个小节
+        # 初始定位：优先命中 category（按分类名），否则第一个小节
         if sub_labels:
             pick = sub_labels[0]
             if category:
@@ -943,7 +1161,7 @@ class DialogsMixin:
                     if row[0] == category:
                         pick = row
                         break
-            _select(pick[0], pick[1])
+            _select(pick[0], pick[1], pick[2])
 
         # 无边框窗口需自行支持缩放：边缘与四角可拖拽
         enable_window_resize(dialog, titlebar=bar)
@@ -1029,6 +1247,8 @@ class DialogsMixin:
         editors = detect_editors()
 
         def _show_category(name):
+            # 记下当前分类：主题切换后据此重建面板，不把用户弹回默认分类
+            dialog._category = name
             if self._settings_content:
                 self._settings_content.destroy()
             self._settings_content = tk.Frame(right, bg=c["sidebar_bg"])
@@ -1056,6 +1276,12 @@ class DialogsMixin:
                 e.pack(side=tk.RIGHT, padx=(0, 8))
                 e.configure(bg=c["content_bg"], fg=c["content_fg"],
                             highlightbackground=c["search_border"])
+                # 输入框本身没有提交路径（此前只有 ± 按钮生效），
+                # 手输 18 再回车/移开焦点不会改变字号，框里却显示 18，
+                # 界面与实际值长期不一致。这里补上回车与失焦提交，
+                # 复用 _delta_size 的钳位与落盘逻辑（d=0 表示只提交不增减）。
+                e.bind("<Return>", lambda ev, sv=sv: _delta_size(sv, 0))
+                e.bind("<FocusOut>", lambda ev, sv=sv: _delta_size(sv, 0))
 
             elif name == "外观":
                 tk.Label(ct, text="主题模式", anchor=tk.W, font=lf,
@@ -1208,6 +1434,12 @@ class DialogsMixin:
         # 默认选中第一个
         _highlight_cat("通用")
         _show_category("通用")
+
+        # 供主题切换后重建面板时回到同一分类（见 _recolor_dialogs）
+        def _select_category(name):
+            _highlight_cat(name)
+            _show_category(name)
+        dialog._select_category = _select_category
 
 
 
