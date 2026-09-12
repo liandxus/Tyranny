@@ -70,8 +70,11 @@ class TrashPanelMixin:
             selectmode="extended")
         self.trash_tree.heading("name", text="名称", anchor=tk.W)
         self.trash_tree.heading("time", text="删除时间", anchor=tk.W)
-        self.trash_tree.column("name", width=110, anchor=tk.W, stretch=True)
-        self.trash_tree.column("time", width=132, anchor=tk.W, stretch=False)
+        # 时间列需完整容纳 19 字符的时间戳（约 150px），stretch=False 固定；
+        # 侧栏偏窄时由名称列收缩让位，避免时间末位被滚动条一侧裁掉
+        self.trash_tree.column("name", width=90, minwidth=56,
+                               anchor=tk.W, stretch=True)
+        self.trash_tree.column("time", width=150, anchor=tk.W, stretch=False)
         self.trash_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.trash_scroll.configure(command=self.trash_tree.yview)
         self.trash_tree.configure(yscrollcommand=self.trash_scroll.set)

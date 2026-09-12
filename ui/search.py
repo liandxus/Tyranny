@@ -8,6 +8,7 @@ IndeXar 搜索交互
 import tkinter as tk
 
 import search_engine
+from markdown_renderer import find_all_hits
 from ui.common import _blend_hex, _readable_fg, SEARCH_HIT_ALPHA, \
     SEARCH_HIT_COLOR
 
@@ -32,44 +33,102 @@ class SearchMixin:
         return "1.0", tk.END
 
     def _jump_to_search_match(self, idx):
-        """在已渲染的正文中查找第 idx 个关键词并滚动选中"""
+        """滚动到第 idx 个关键词所在位置（正文或代码块）"""
         kw = getattr(self, '_cur_keyword', '')
         if not kw:
             return
-        count = 0
-        pos = "1.0"
-        _, body_end = self._note_body_range()
+        start, body_end = self._note_body_range()
+        hits = find_all_hits(self.content_text, kw, start, body_end)
+
         self.content_text.configure(state=tk.NORMAL)
-        while True:
-            pos = self.content_text.search(kw, pos, nocase=True,
-                                           stopindex=body_end)
-            if not pos:
-                break
-            if count == idx:
-                line = int(pos.split(".")[0])
-                total = int(self.content_text.index("end-1c").split(".")[0])
-                frac = (line - 1) / max(total, 1)
-                self.content_text.yview_moveto(frac)
-                end = f"{pos}+{len(kw)}c"
-                # 使用自定义 tag 而非 tk.SEL：后者依赖控件焦点，
-                # 失焦时选中高亮不会显示，故用自定义 tag；
-                # 基色按 alpha 与内容区背景混合，等效半透明且自适应主题
-                base_bg = self.content_text.cget("bg")
-                hit_bg = _blend_hex(SEARCH_HIT_COLOR, base_bg,
-                                    SEARCH_HIT_ALPHA)
-                self.content_text.tag_configure(
-                    "search_hit", background=hit_bg,
-                    foreground=_readable_fg(hit_bg))
-                self.content_text.tag_remove("search_hit", "1.0", tk.END)
-                self.content_text.tag_add("search_hit", pos, end)
-                self.content_text.see(pos)
-                self.content_text.configure(state=tk.DISABLED)
-                return
-            count += 1
-            pos = f"{pos}+1c"
-        # 未命中（索引越界）：清除上一次的高亮，避免残留
         self.content_text.tag_remove("search_hit", "1.0", tk.END)
+        self._clear_table_selection()
+        if idx < 0 or idx >= len(hits):
+            # 索引越界：保持已清除的高亮，避免残留
+            self.content_text.configure(state=tk.DISABLED)
+            return
+
+        hit = hits[idx]
+        if hit[0] == 'text':
+            self._clear_embed_hit_hint()
+            pos = hit[1]
+            self._scroll_to_index(pos)
+            end = f"{pos}+{len(kw)}c"
+            # 使用自定义 tag 而非 tk.SEL：后者依赖控件焦点，
+            # 失焦时选中高亮不会显示，故用自定义 tag；
+            # 基色按 alpha 与内容区背景混合，等效半透明且自适应主题
+            base_bg = self.content_text.cget("bg")
+            hit_bg = _blend_hex(SEARCH_HIT_COLOR, base_bg,
+                                SEARCH_HIT_ALPHA)
+            self.content_text.tag_configure(
+                "search_hit", background=hit_bg,
+                foreground=_readable_fg(hit_bg))
+            self.content_text.tag_add("search_hit", pos, end)
+            self.content_text.see(pos)
+        elif hit[0] == 'code':
+            # 代码块：文本在子 Text 里，主 Text 只能滚到整个代码块，
+            # 再按命中行在块内的像素偏移补一段，让命中行进入视野
+            _kind, body, bpos, code_idx = hit
+            self._scroll_to_index(code_idx)
+            self.content_text.see(code_idx)
+            body.see(bpos)                  # 超宽行还需横向定位
+            try:
+                info = body.dlineinfo(bpos)
+                if info:
+                    self.content_text.yview_scroll(int(info[1]), "pixels")
+            except (tk.TclError, TypeError, ValueError):
+                pass
+            self._show_embed_hit_hint(
+                f"   命中位于代码块第 {str(bpos).split('.', 1)[0]} 行")
+        elif hit[0] == 'table':
+            # 表格：Treeview 只能整行着色，故选中命中行来指示位置
+            _kind, tree, iid, row_no, col_no, pos_idx = hit
+            self._scroll_to_index(pos_idx)
+            self.content_text.see(pos_idx)
+            try:
+                tree.selection_set(iid)
+                tree.focus(iid)
+                tree.see(iid)
+            except tk.TclError:
+                pass
+            self._show_embed_hit_hint(
+                f"   命中位于表格第 {row_no} 行第 {col_no} 列")
         self.content_text.configure(state=tk.DISABLED)
+
+    def _scroll_to_index(self, index):
+        """按 index 把内容区滚到大致位置（行号换算成比例）"""
+        line = int(str(index).split(".", 1)[0])
+        total = int(self.content_text.index("end-1c").split(".")[0])
+        self.content_text.yview_moveto((line - 1) / max(total, 1))
+
+    def _show_embed_hit_hint(self, text):
+        """嵌入控件（代码块/表格）命中不做黄色高亮，改用状态栏说明位置"""
+        try:
+            if not getattr(self, "_embed_hit_saved", False):
+                self._embed_hit_saved = True
+                self._embed_hit_prev = self.status_left.cget("text")
+            self.status_left.configure(text=text)
+        except tk.TclError:
+            pass
+
+    def _clear_table_selection(self):
+        """清除上一次跳转选中的表格行，避免跳到正文后仍有行处于选中态"""
+        for ref in getattr(self.content_text, "_md_tables", []):
+            try:
+                sel = ref.tree.selection()
+                if sel:
+                    ref.tree.selection_remove(*sel)
+            except tk.TclError:
+                pass
+
+    def _clear_embed_hit_hint(self):
+        """跳到正文命中时，把状态栏恢复成嵌入控件提示之前的文本"""
+        if getattr(self, "_embed_hit_saved", False):
+            self._embed_hit_saved = False
+            try:
+                self.status_left.configure(text=self._embed_hit_prev)
+            except tk.TclError:
+                pass
 
     # ══════════════════════════════════
     # 标签
@@ -204,48 +263,58 @@ class SearchMixin:
             self.content_text.configure(state=tk.DISABLED)
 
     def _count_matches(self, keyword):
-        """统计已渲染正文中关键词出现次数（不含反向链接框）"""
-        count = 0
-        pos, body_end = self._note_body_range()
-        while True:
-            pos = self.content_text.search(keyword, pos, nocase=True,
-                                           stopindex=body_end)
-            if not pos:
-                break
-            count += 1
-            pos = f"{pos}+1c"
-        return count
+        """统计已渲染正文中关键词出现次数（不含反向链接框）。
+
+        代码块文本在嵌入子控件里，主 Text 的 search 搜不到，故统一走
+        find_all_hits，保证计数、片段列表与跳转三者的序号一致。"""
+        start, body_end = self._note_body_range()
+        return len(find_all_hits(self.content_text, keyword, start, body_end))
 
     def _extract_text_snippets(self, keyword, max_count=10):
-        """从已渲染内容中提取关键词短片段（前后各6字 + 省略号）。
+        """从已渲染内容中提取关键词短片段。
 
-        返回 (出现序号, 文本) 列表：序号是关键词在正文中第几次出现，
+        正文取前后各 6 字 + 省略号；代码块取整行并加 [代码] 前缀。
+        返回 (出现序号, 文本) 列表：序号与 find_all_hits 的顺序一致，
         供 __snippet_N 精确定位。相同摘要去重但保留首次出现的序号，
-        避免去重后列表序号与正文出现序号错位（点 [2] 跳到第 3 个）。"""
+        避免去重后列表序号与实际出现序号错位（点 [2] 跳到第 3 个）。"""
         results = []
         seen = set()
-        pos, body_end = self._note_body_range()
+        start, body_end = self._note_body_range()
         ctx = 6
-        count = 0
-        while True:
-            pos = self.content_text.search(keyword, pos, nocase=True,
-                                           stopindex=body_end)
-            if not pos:
-                break
-            # 提取前后各 ctx 字符
-            start = f"{pos}-{ctx}c"
-            end = f"{pos}+{len(keyword)+ctx}c"
-            s = self.content_text.get(start, end).replace("\n", " ").strip()
-            # 添加省略号（末尾判断以正文结尾为准，不含反向链接框）
-            tail = "end-1c" if body_end == tk.END else body_end
-            if self.content_text.compare(start, ">", "1.0"):
-                s = "..." + s
-            if self.content_text.compare(end, "<", tail):
-                s = s + "..."
+        # 末尾判断以正文结尾为准（不含反向链接框）
+        tail = "end-1c" if body_end == tk.END else body_end
+        hits = find_all_hits(self.content_text, keyword, start, body_end)
+        for count, hit in enumerate(hits):
+            if hit[0] == 'text':
+                pos = hit[1]
+                s_start = f"{pos}-{ctx}c"
+                s_end = f"{pos}+{len(keyword)+ctx}c"
+                s = self.content_text.get(s_start, s_end)
+                s = s.replace("\n", " ").strip()
+                if self.content_text.compare(s_start, ">", "1.0"):
+                    s = "..." + s
+                if self.content_text.compare(s_end, "<", tail):
+                    s = s + "..."
+            elif hit[0] == 'code':
+                body = hit[1]
+                line = str(hit[2]).split(".", 1)[0]
+                s = body.get(f"{line}.0", f"{line}.end").strip()
+                if len(s) > 36:
+                    s = s[:36] + "…"
+                s = f"[代码] {s}"
+            else:
+                _kind, tree, iid, _row, _col, _pos = hit
+                try:
+                    values = tree.item(iid, "values")
+                except tk.TclError:
+                    values = ()
+                s = " | ".join(str(v) for v in values).strip()
+                if len(s) > 36:
+                    s = s[:36] + "…"
+                s = f"[表格] {s}"
             if s not in seen:
                 seen.add(s)
                 results.append((count, s))
-            count += 1
             if len(results) >= max_count:
                 break
         return results

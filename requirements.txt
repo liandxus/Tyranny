@@ -4,3 +4,5 @@ Markdown>=3.4
 python-frontmatter>=1.0
 Pillow>=10.0
 svg.path>=6.0
+# 代码块语法高亮（可选：缺失时代码块退化为纯文本，其余功能不受影响）
+Pygments>=2.14

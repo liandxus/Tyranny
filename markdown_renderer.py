@@ -5,6 +5,7 @@ IndeXar Markdown 渲染器
 
 import os
 import re
+from collections import namedtuple
 from html.parser import HTMLParser
 from html import unescape
 
@@ -12,6 +13,23 @@ import tkinter as tk
 from tkinter import ttk
 
 import markdown
+
+# ── 语法高亮（可选依赖）：缺失时代码块退化为纯文本，不影响其它渲染 ──
+try:
+    from pygments import lex as _pyg_lex
+    from pygments.lexers import get_lexer_by_name as _pyg_lexer_by_name
+    from pygments.lexers import guess_lexer as _pyg_guess_lexer
+    from pygments.styles import get_style_by_name as _pyg_get_style
+    from pygments.token import Token as _PygToken
+    _HAS_PYGMENTS = True
+except Exception:      # pragma: no cover - 依赖缺失时的降级路径
+    _HAS_PYGMENTS = False
+    _PygToken = None
+
+# Pygments 配色风格：亮色用 VS 风格，暗色用 Monokai
+_PYG_STYLE_LIGHT = "vs"
+_PYG_STYLE_DARK = "monokai"
+_pyg_style_cache = {}
 
 
 def render_markdown(text_widget, md_text, link_callback=None, font_size=11,
@@ -40,6 +58,24 @@ def render_markdown(text_widget, md_text, link_callback=None, font_size=11,
     text_widget._hover_cb = hover_callback
     text_widget._extlink_cb = extlink_callback
 
+    # 清理上一次渲染的代码块控件：Text.delete 只会摘除嵌入窗口，
+    # 不会销毁它们，需手动 destroy 否则会随渲染次数累积
+    for holder in getattr(text_widget, "_md_code_blocks", []):
+        try:
+            holder.destroy()
+        except Exception:
+            pass
+    text_widget._md_code_blocks = []
+    # 表格同理：delete 只摘除嵌入窗口，不销毁，需手动清理防止累积
+    for ref in getattr(text_widget, "_md_tables", []):
+        try:
+            ref.tree.destroy()
+        except Exception:
+            pass
+    text_widget._md_tables = []
+    text_widget._code_last_width = -1
+    _bind_code_resize(text_widget)
+
     # 清理上一次渲染留下的动态链接标签，防止颜色残留
     _cleanup_dynamic_tags(text_widget)
     # 重置链接映射，并依背景预计算外链颜色
@@ -59,6 +95,9 @@ def render_markdown(text_widget, md_text, link_callback=None, font_size=11,
 
     # [[wikilink]] 预处理 → 标准 markdown 链接（协议前缀标记内部链接）
     md_text = _preprocess_wikilinks(md_text)
+
+    # GFM 任务列表 [ ] / [x] → 复选框占位符
+    md_text = _preprocess_task_lists(md_text)
 
     # ~~删除线~~ → <del>（markdown 库的 extra 扩展不含 GFM 删除线语法）
     md_text = _preprocess_strikethrough(md_text)
@@ -108,6 +147,50 @@ def _preprocess_strikethrough(text):
     return "\n".join(out)
 
 
+# GFM 任务列表：- [ ] / - [x]
+# [ ]、[x] 保持原样会被当成普通文本（还可能被误判成引用式链接），
+# 先换成控制字符包裹的占位符，渲染时再换成复选框
+# 行首允许缩进与引用符号，以便覆盖「引用块里的任务列表」这类嵌套写法
+_TASK_LINE_RE = re.compile(
+    r'^([\t ]*(?:>[\t ]*)*)([-*+]|\d+[.)])([\t ]+)(\[[ xX]\])([ \t]*)')
+_TASK_MARK_RE = re.compile('\u0001TASK([01])\u0001[ \t]*')
+_TASK_PLAIN_RE = re.compile('\u0001TASK([01])\u0001')
+
+
+def _restore_task_marks(text):
+    """把没被列表项消费掉的占位符还原成 [ ] / [x]。
+
+    写法不规范的列表（例如引用块里与前一段之间没有空行）不会被
+    markdown 解析成列表，此时占位符就会流到正文，必须还原，
+    否则控制字符会直接显示出来。"""
+    if "\u0001" not in text:
+        return text
+    return _TASK_PLAIN_RE.sub(
+        lambda m: "[x]" if m.group(1) == "1" else "[ ]", text)
+
+
+def _preprocess_task_lists(text):
+    """把任务列表的 [ ] / [x] 替换为占位符（围栏代码块内保持原样）"""
+    out = []
+    in_fence = False
+    for line in text.split("\n"):
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            out.append(line)
+            continue
+        if in_fence:
+            out.append(line)
+            continue
+        m = _TASK_LINE_RE.match(line)
+        if m:
+            mark = ("\u0001TASK1\u0001" if m.group(4)[1].lower() == "x"
+                    else "\u0001TASK0\u0001")
+            line = line[:m.start(4)] + mark + m.group(5) + line[m.end():]
+        out.append(line)
+    return "\n".join(out)
+
+
 def _looks_like_note_target(href):
     """判断非协议链接是否指向站内笔记：结尾为 .md，或整段没有扩展名"""
     h = (href or "").split("#")[0].split("?")[0].strip()
@@ -144,6 +227,10 @@ def _preprocess_wikilinks(text):
 # HTML → Text 渲染器
 # ══════════════════════════════════
 
+# 表格在主 Text 中的登记信息：控件、所在位置、各行 (iid, 单元格文本)
+_TableRef = namedtuple("_TableRef", "tree position rows")
+
+
 class _MarkdownHTMLRenderer(HTMLParser):
     """将 markdown 库生成的 HTML 渲染到 Tkinter Text 控件。"""
 
@@ -161,11 +248,13 @@ class _MarkdownHTMLRenderer(HTMLParser):
         # ── 代码块状态 ──
         self._in_pre = False
         self._code_buf = []
+        self._code_lang = None     # 围栏代码块的 language-xxx 标识
 
         # ── 列表状态 ──
         self._list_depth = 0      # 嵌套深度
         self._list_stack = []     # 每层 [类型('ul'/'ol'), 下一个编号]
         self._li_fresh = False    # 刚插入 li 项目符号，用于跳过随后的格式化空白
+        self._li_pending = False  # 项目符号延后输出（任务列表项要换成复选框）
 
         # ── 链接状态 ──
         self._anchor_title = ""     # 当前 <a> 的 title，供图片悬浮提示使用
@@ -186,8 +275,14 @@ class _MarkdownHTMLRenderer(HTMLParser):
         # 代码块：<pre> 内所有内容原样保留
         if tag == 'pre':
             self._in_pre = True
+            self._code_lang = None
             return
         if self._in_pre:
+            # <pre><code class="language-python"> —— 只取语言标识，不建样式
+            if tag == 'code':
+                m = re.search(r'language-([\w+#.\-]+)', a.get('class', '') or '')
+                if m:
+                    self._code_lang = m.group(1)
             return
 
         # ── 表格 ──
@@ -247,11 +342,32 @@ class _MarkdownHTMLRenderer(HTMLParser):
 
         # ── 列表 ──
         elif tag in ('ul', 'ol'):
+            self._flush_pending_bullet()        # 列表项里直接嵌套列表
             self._list_depth += 1
             self._list_stack.append([tag, 1])   # 每层独立记录类型与编号
         elif tag == 'li':
-            self._insert(self._list_bullet())
+            # 符号推迟到第一段文本：任务列表项要用复选框替代圆点
+            self._li_pending = True
             self._li_fresh = True
+
+    def _flush_pending_bullet(self):
+        """补插尚未输出的列表项符号（嵌套列表或空列表项时调用）"""
+        if self._li_pending:
+            self._li_pending = False
+            self._insert(self._list_bullet())
+
+    def _take_list_bullet(self, head):
+        """输出列表项符号并返回剩余待渲染文本。
+
+        任务列表项（占位符开头）用复选框代替圆点，并吃掉占位符本身。"""
+        m = _TASK_MARK_RE.match(head)
+        if m:
+            indent = "  " * (self._list_depth - 1)
+            box = "☑" if m.group(1) == "1" else "☐"
+            self._insert(indent + box + " ")
+            return head[m.end():]
+        self._insert(self._list_bullet())
+        return head
 
     def _list_bullet(self):
         """返回当前列表深度的项目符号（按该层自身的类型决定圆点或编号）"""
@@ -274,11 +390,11 @@ class _MarkdownHTMLRenderer(HTMLParser):
             if tag == 'pre':
                 self._in_pre = False
                 if self._code_buf:
-                    code = '\n'.join(self._code_buf)
-                    self.w.insert('end', code, 'code_block')
-                    # 换行不带 code_block 标签，防止背景色泄露到下行
-                    self.w.insert('end', '\n')
+                    # 直接拼接：HTML 实体（&lt; 等）会让 handle_data 分多次调用，
+                    # 片段间本就连续，用 join('\n') 会多出换行
+                    self._flush_code_block(''.join(self._code_buf))
                     self._code_buf = []
+                    self._code_lang = None
             return
 
         # ── 表格结束 ──
@@ -333,6 +449,7 @@ class _MarkdownHTMLRenderer(HTMLParser):
 
         # ── 列表收尾 ──
         elif tag == 'li':
+            self._flush_pending_bullet()   # 空列表项：补上符号
             self._li_fresh = False
             self._insert('\n')
         elif tag in ('ul', 'ol'):
@@ -350,7 +467,7 @@ class _MarkdownHTMLRenderer(HTMLParser):
 
         # 表格单元格内：累积文本（跨行内标签合并为一个单元格）
         if self._in_table:
-            self._current_cell += unescape(data)
+            self._current_cell += _restore_task_marks(unescape(data))
             return
 
         # <li> 与内容之间的格式化空白（HTML 源码里的换行）不渲染，
@@ -360,6 +477,11 @@ class _MarkdownHTMLRenderer(HTMLParser):
             if not data.strip():
                 return
 
+        # 列表项：符号延后到此处输出，任务列表项据此换成复选框
+        if self._li_pending:
+            self._li_pending = False
+            data = self._take_list_bullet(data)
+
         # 普通文本：渲染
         self._insert(unescape(data))
 
@@ -367,6 +489,7 @@ class _MarkdownHTMLRenderer(HTMLParser):
 
     def _insert(self, text, extra_tags=()):
         """向 Text 控件插入文本，应用当前样式栈中所有标签"""
+        text = _restore_task_marks(text)
         tags = list(extra_tags)
         for s in self._stack:
             if isinstance(s, tuple) and s[0] == 'wikilink':
@@ -396,10 +519,267 @@ class _MarkdownHTMLRenderer(HTMLParser):
             else:
                 tags.append(s)
 
+        # ***粗斜体*** 会同时压入 bold 与 italic，而 Tk 同一字符上同优先级
+        # 的 tag 只生效一个，必须换成专门的 bold_italic 样式
+        if 'bold' in tags and 'italic' in tags:
+            tags = [t for t in tags if t not in ('bold', 'italic')]
+            tags.append('bold_italic')
+
         if tags:
             self.w.insert('end', text, tuple(tags))
         else:
             self.w.insert('end', text)
+
+    # ── 代码块 ──
+
+    def _flush_code_block(self, code):
+        """渲染代码块：独立控件承载，带语言标签、复制按钮与语法高亮。
+
+        之所以不用 Text tag 直接插入：主 Text 的 wrap 是全局的，
+        无法只对代码块关闭折行，长代码行会被拆成多行难以阅读。"""
+        # markdown 库会在 <pre> 内容末尾保留换行，先去掉尾随空行
+        code = code.rstrip("\n")
+        if not code.strip():
+            return
+
+        w = self.w
+        try:
+            base_bg = w.cget("bg")
+        except tk.TclError:
+            base_bg = "#ffffff"
+        dark = _is_dark_color(base_bg)
+        style = _pyg_style(dark)
+        fs = max(8, self.fs - 1)
+
+        # 'vs' 等亮色方案的背景是纯白，与正文同色会让代码块失去边界感
+        style_bg = getattr(style, "background_color", None)
+        if dark:
+            code_bg = style_bg or "#272822"
+        elif style_bg and style_bg.lower() != "#ffffff":
+            code_bg = style_bg
+        else:
+            code_bg = "#f6f8fa"
+        code_fg = self._pyg_text_fg(style) or ("#d4d4d4" if dark else "#333333")
+        border = "#3f3f46" if dark else "#d8d8d8"
+        bar_bg = "#2b2b2b" if dark else "#ececec"
+        bar_fg = "#9c9c9c" if dark else "#666666"
+        ok_fg = "#4ec9b0" if dark else "#0a7d3c"
+
+        lexer = self._code_lexer(self._code_lang, code)
+        label = lexer.name if lexer else (self._code_lang or "纯文本")
+        if label == "Text only":        # Pygments 对 ```text 的显示名
+            label = "纯文本"
+
+        holder = tk.Frame(w, bg=border, bd=0, highlightthickness=1,
+                          highlightbackground=border, highlightcolor=border)
+
+        # ── 顶部栏：语言标签 + 复制按钮 ──
+        bar = tk.Frame(holder, bg=bar_bg)
+        bar.pack(side=tk.TOP, fill=tk.X)
+        tk.Label(bar, text=label, font=("Microsoft YaHei", max(8, fs - 1)),
+                 bg=bar_bg, fg=bar_fg, padx=10, pady=3).pack(side=tk.LEFT)
+        copy_lbl = tk.Label(bar, text="复制",
+                            font=("Microsoft YaHei", max(8, fs - 1)),
+                            bg=bar_bg, fg=bar_fg, padx=10, pady=3,
+                            cursor="hand2")
+        copy_lbl.pack(side=tk.RIGHT)
+
+        # ── 代码主体：wrap=NONE，代码按原样单行呈现 ──
+        body = tk.Text(holder, wrap=tk.NONE, height=code.count("\n") + 1,
+                       font=("Consolas", fs), bg=code_bg, fg=code_fg,
+                       bd=0, highlightthickness=0, relief=tk.FLAT,
+                       padx=12, pady=8, insertontime=0, cursor="arrow",
+                       selectbackground="#264f78" if dark else "#cce8ff",
+                       selectforeground="#ffffff" if dark else "#000000")
+        body.pack(side=tk.TOP, fill=tk.X)
+
+        hsb = tk.Scrollbar(holder, orient=tk.HORIZONTAL, command=body.xview,
+                           bg=bar_bg, troughcolor=code_bg,
+                           activebackground=border, bd=0,
+                           highlightthickness=0, width=9)
+        body.configure(xscrollcommand=hsb.set)
+
+        self._render_code_body(body, code, lexer, style, fs)
+
+        # ── 复制：按钮复制整块，右键可复制选中片段 ──
+        def _put(text):
+            try:
+                w.clipboard_clear()
+                w.clipboard_append(text)
+            except Exception:
+                pass
+
+        def _restore_copy():
+            try:
+                if copy_lbl.winfo_exists():
+                    copy_lbl.configure(text="复制", fg=bar_fg)
+            except Exception:
+                pass
+
+        def _copy(event=None):
+            _put(code)
+            copy_lbl.configure(text="已复制", fg=ok_fg)
+            w.after(1200, _restore_copy)
+
+        copy_lbl.bind("<Button-1>", _copy)
+        copy_lbl.bind("<Enter>", lambda e: copy_lbl.configure(fg=code_fg))
+        copy_lbl.bind("<Leave>", lambda e: copy_lbl.configure(fg=bar_fg))
+
+        # body 保持可编辑态才能用鼠标选中；输入在此拦截，Ctrl+C 等组合放行
+        def _block_edit(e):
+            if e.state & 0x4 or e.state & 0x8 or e.state & 0x20000:
+                return None                      # Ctrl/Alt 组合：交给系统绑定
+            if e.keysym == "Tab":                # Tab 用于移焦，别插进正文
+                w.focus_set()
+                return "break"
+            if len(e.keysym) == 1 or e.keysym in (
+                    "Return", "KP_Enter", "BackSpace", "Delete"):
+                return "break"
+            return None
+        body.bind("<Key>", _block_edit)
+        body.bind("<<Paste>>", lambda e: "break")
+
+        def _popup(e):
+            sel = body.tag_ranges(tk.SEL)
+            menu = tk.Menu(body, tearoff=0)
+            if sel:
+                picked = body.get(sel[0], sel[1])
+                menu.add_command(label="复制选中", command=lambda: _put(picked))
+            menu.add_command(label="复制全部", command=lambda: _put(code))
+            menu.post(e.x_root, e.y_root)
+        body.bind("<Button-3>", _popup)
+
+        # ── 滚轮：垂直交给主 Text，Shift+滚轮横向滚动代码块 ──
+        self._bind_wheel_to_text(body)
+
+        def _wheel_x(e):
+            step = int(e.delta / 120) or (1 if e.delta > 0 else -1)
+            body.xview_scroll(-step, "units")
+            return "break"
+        body.bind("<Shift-MouseWheel>", _wheel_x)
+
+        # 登记：主 Text 宽度变化时重排（Text 的 width 以字符计）
+        holder._code_body = body
+        holder._code_text = code
+        holder._code_resize = lambda avail: self._resize_code_block(
+            holder, body, hsb, fs, avail)
+        if not hasattr(w, "_md_code_blocks"):
+            w._md_code_blocks = []
+        w._md_code_blocks.append(holder)
+        holder._code_resize(_available_width(w))
+
+        # 嵌入：前一行非空时先换行，避免与正文挤在同一行
+        try:
+            if w.index("end-1c") != w.index("end-1c linestart"):
+                w.insert("end", "\n")
+        except tk.TclError:
+            pass
+        w.window_create("end", window=holder, pady=6)
+        # 记录窗口在主 Text 中的位置：搜索时用于把代码块命中与正文命中
+        # 按文档顺序排序，并据此滚动定位
+        holder._code_index = w.index("end-1c")
+        w.insert("end", "\n")
+
+    def _code_lexer(self, lang, code):
+        """按语言标识取 lexer。
+
+        无标识（缩进代码块）不猜语言：短片段猜测误判率高，
+        反而会得到错误的高亮配色。"""
+        if not _HAS_PYGMENTS or not lang:
+            return None
+        try:
+            return _pyg_lexer_by_name(lang, stripnl=False, stripall=False)
+        except Exception:
+            pass
+        try:
+            return _pyg_guess_lexer(code, stripnl=False, stripall=False)
+        except Exception:
+            return None
+
+    def _render_code_body(self, body, code, lexer, style, fs):
+        """把代码按 Pygments token 分段插入，每段套对应颜色 tag"""
+        body.configure(state=tk.NORMAL)
+        try:
+            if lexer is not None and _HAS_PYGMENTS:
+                cache = {}
+                for ttype, value in _pyg_lex(code, lexer):
+                    if not value:
+                        continue
+                    color, bold, italic = _pyg_token_style(style, ttype, cache)
+                    if color or bold or italic:
+                        body.insert("end", value,
+                                    self._pyg_tag(body, color, bold,
+                                                  italic, fs))
+                    else:
+                        body.insert("end", value)
+            else:
+                body.insert("end", code)
+        except Exception:
+            # 高亮失败不应影响阅读，退回纯文本
+            body.delete("1.0", "end")
+            body.insert("end", code)
+        # 不置 DISABLED：禁用态无法聚焦，选中后 Ctrl+C 复制会失效
+        body.configure(state=tk.NORMAL)
+
+    def _pyg_tag(self, body, color, bold, italic, fs):
+        """按颜色/字形取（必要时创建）代码高亮 tag"""
+        name = "pyg_" + (color.lstrip("#") if color else "d")
+        if bold:
+            name += "b"
+        if italic:
+            name += "i"
+        if name not in body.tag_names():
+            mods = " ".join(x for x in (("bold" if bold else ""),
+                                        ("italic" if italic else "")) if x)
+            cfg = {"font": ("Consolas", fs) + ((mods,) if mods else ())}
+            if color:
+                cfg["foreground"] = color
+            body.tag_configure(name, **cfg)
+        return name
+
+    def _pyg_text_fg(self, style):
+        """取配色方案中正文（Token.Text）的前景色"""
+        if style is None or _PygToken is None:
+            return None
+        return _pyg_token_style(style, _PygToken.Text, {})[0]
+
+    def _resize_code_block(self, holder, body, hsb, fs, avail):
+        """按可用像素宽度换算字符列数；最长行超出可视宽度才显示横向滚动条。
+
+        这里用字体测量而非 body.xview()：嵌入窗口在布局完成前 xview()
+        恒为 (0.0, 1.0)，据此判断会永远不显示滚动条。"""
+        try:
+            from tkinter import font as tkfont
+            f = tkfont.Font(font=("Consolas", fs))
+            cw = max(1, f.measure("0"))
+        except Exception:
+            f, cw = None, 8
+
+        # 扣除 body 的 padx(12×2) 与 holder 边框
+        cols = max(20, int((avail - 26) / cw))
+        try:
+            body.configure(width=cols)
+        except tk.TclError:
+            return
+
+        code = getattr(holder, "_code_text", "") or ""
+        if f is not None and code:
+            # 按像素量最长行：等宽字体下中英文宽度不同，不能只比字符数
+            longest = max(code.split("\n"), key=f.measure)
+            need = f.measure(longest) > cols * cw
+        else:
+            need = any(len(x) > cols for x in code.split("\n"))
+
+        try:
+            # 用 winfo_manager 而非 winfo_ismapped：嵌入窗口只有滚动到
+            # 可视区才会被映射，未映射不代表没布局
+            laid_out = bool(hsb.winfo_manager())
+            if need and not laid_out:
+                hsb.pack(side=tk.BOTTOM, fill=tk.X)
+            elif not need and laid_out:
+                hsb.pack_forget()
+        except Exception:
+            pass
 
     # ── 图片 ──
 
@@ -571,18 +951,8 @@ class _MarkdownHTMLRenderer(HTMLParser):
         return None
 
     def _available_width(self):
-        """Text 控件可用于图片的像素宽度（扣除内边距）"""
-        try:
-            width = self.w.winfo_width()
-        except tk.TclError:
-            width = 0
-        if width <= 1:          # 尚未完成布局，用近似值兜底
-            return 720
-        try:
-            pad = int(self.w.cget("padx")) * 2
-        except (tk.TclError, ValueError):
-            pad = 40
-        return max(120, width - pad - 8)
+        """Text 控件可用于图片/代码块的像素宽度（扣除内边距）"""
+        return _available_width(self.w)
 
     def _pop_str(self, name):
         """从样式栈中移除指定名称的样式（最近一个）"""
@@ -655,9 +1025,11 @@ class _MarkdownHTMLRenderer(HTMLParser):
             # stretch=True 允许列宽随窗口调整，minwidth 保留拖拽缩小的下限
             tree.column(col_id, width=width, minwidth=60, anchor="w", stretch=True)
 
+        rows = []           # [(行 iid, [单元格文本])]，供搜索使用
         for cells in data_rows:
             values = cells + [""] * (col_count - len(cells))
-            tree.insert("", "end", values=values[:col_count])
+            iid = tree.insert("", "end", values=values[:col_count])
+            rows.append((iid, values[:col_count]))
 
         if not data_rows:
             tree.insert("", "end", values=[""] * col_count)
@@ -717,7 +1089,13 @@ class _MarkdownHTMLRenderer(HTMLParser):
 
         self.w.insert("end", "\n")
         self.w.window_create("end", window=tree)
+        pos = self.w.index("end-1c")     # 表格窗口在主 Text 中的位置
         self.w.insert("end", "\n")
+
+        # 登记表格：Treeview 的文本同样不在主 Text 里，搜索时需单独查
+        if not hasattr(self.w, "_md_tables"):
+            self.w._md_tables = []
+        self.w._md_tables.append(_TableRef(tree, pos, rows))
 
         self._table_rows = []
 
@@ -770,6 +1148,174 @@ class _MarkdownHTMLRenderer(HTMLParser):
 # ══════════════════════════════════
 # 辅助函数
 # ══════════════════════════════════
+
+def _available_width(text_widget):
+    """Text 控件可用于嵌入内容的像素宽度（扣除内边距）"""
+    try:
+        width = text_widget.winfo_width()
+    except tk.TclError:
+        width = 0
+    if width <= 1:          # 尚未完成布局，用近似值兜底
+        return 720
+    try:
+        pad = int(text_widget.cget("padx")) * 2
+    except (tk.TclError, ValueError):
+        pad = 40
+    return max(120, width - pad - 8)
+
+
+def _bind_code_resize(text_widget):
+    """主 Text 宽度变化时同步所有代码块宽度（整个控件生命周期只绑一次）"""
+    if getattr(text_widget, "_code_resize_bound", False):
+        return
+
+    def _on_configure(event=None):
+        holders = getattr(text_widget, "_md_code_blocks", [])
+        if not holders:
+            return
+        avail = _available_width(text_widget)
+        # Configure 触发非常频繁，宽度没实质变化就直接跳过
+        if abs(avail - getattr(text_widget, "_code_last_width", -1)) < 4:
+            return
+        text_widget._code_last_width = avail
+        for holder in list(holders):
+            try:
+                holder._code_resize(avail)
+            except Exception:
+                pass
+
+    text_widget.bind("<Configure>", _on_configure, add="+")
+    text_widget._code_resize_bound = True
+
+
+def find_all_hits(text_widget, keyword, start="1.0", stop=None):
+    """在正文与代码块中查找关键词，返回按文档顺序排列的命中列表。
+
+    代码块文本位于嵌入的子 Text 中，主 Text 的 search() 覆盖不到
+    （表格同理），必须单独查询后再按位置合并排序。
+
+    每项为：
+        ('text', index)                      —— 正文命中
+        ('code', body, body_index, position) —— 代码块命中
+        ('table', tree, iid, row, col, position) —— 表格命中
+        （position 是该嵌入控件在主 Text 中的位置，供排序与滚动定位）
+    """
+    if not keyword:
+        return []
+    if stop is None:
+        stop = tk.END
+
+    kw = keyword.lower()
+    hits = []
+
+    # ① 正文
+    pos = start
+    while True:
+        try:
+            pos = text_widget.search(keyword, pos, nocase=True,
+                                     stopindex=stop)
+        except tk.TclError:
+            break
+        if not pos:
+            break
+        hits.append(('text', pos))
+        pos = f"{pos}+1c"
+
+    # ② 代码块（块内按出现顺序追加，排序是稳定排序）
+    for holder in list(getattr(text_widget, "_md_code_blocks", [])):
+        body = getattr(holder, "_code_body", None)
+        if body is None:
+            continue
+        bpos = "1.0"
+        while True:
+            try:
+                bpos = body.search(keyword, bpos, nocase=True,
+                                   stopindex="end")
+            except tk.TclError:
+                break
+            if not bpos:
+                break
+            hits.append(('code', body, bpos,
+                         getattr(holder, "_code_index", "1.0")))
+            bpos = f"{bpos}+1c"
+
+    # ③ 表格（Treeview 的单元格文本搜不到，只能逐格匹配）
+    for ref in list(getattr(text_widget, "_md_tables", [])):
+        for row_no, (iid, cells) in enumerate(ref.rows, 1):
+            for col_no, cell in enumerate(cells, 1):
+                text = str(cell)
+                if not text:
+                    continue
+                cells_l = text.lower()
+                at = cells_l.find(kw)
+                while at != -1:
+                    hits.append(('table', ref.tree, iid, row_no, col_no,
+                                 ref.position))
+                    at = cells_l.find(kw, at + 1)
+
+    def _order(item):
+        """排序键：(主 Text 行, 列, 类型序, 控件内位置)"""
+        if item[0] == 'text':
+            idx, sub = item[1], (0, 0)
+        elif item[0] == 'code':
+            idx = item[3]
+            bl, _, bc = str(item[2]).partition(".")
+            try:
+                sub = (1, int(bl) * 100000 + int(bc))
+            except ValueError:
+                sub = (1, 0)
+        else:
+            idx = item[5]
+            sub = (2, item[3] * 1000 + item[4])
+        line, _, col = str(idx).partition(".")
+        try:
+            return (int(line), int(col)) + sub
+        except ValueError:
+            return (0, 0) + sub
+
+    hits.sort(key=_order)
+    return hits
+
+
+def _pyg_style(dark):
+    """取 Pygments 配色方案（亮/暗各一套，取不到返回 None → 不高亮）"""
+    key = "dark" if dark else "light"
+    if key not in _pyg_style_cache:
+        st = None
+        if _HAS_PYGMENTS:
+            try:
+                st = _pyg_get_style(
+                    _PYG_STYLE_DARK if dark else _PYG_STYLE_LIGHT)
+            except Exception:
+                st = None
+        _pyg_style_cache[key] = st
+    return _pyg_style_cache[key]
+
+
+def _pyg_token_style(style, ttype, cache):
+    """取 token 的（颜色, 粗体, 斜体）；只接受 #rrggbb 形式的颜色"""
+    if style is None:
+        return (None, False, False)
+    if ttype in cache:
+        return cache[ttype]
+    color, bold, italic = None, False, False
+    try:
+        d = style.style_for_token(ttype) or {}
+        c = d.get("color")
+        # Pygments 返回的颜色不带 #（如 '0000ff'），统一补成 #rrggbb
+        if isinstance(c, str):
+            c = c.strip()
+            if len(c) == 7 and c.startswith("#"):
+                color = c
+            elif len(c) == 6 and all(ch in "0123456789abcdefABCDEF" for ch in c):
+                color = "#" + c
+        bold = bool(d.get("bold"))
+        italic = bool(d.get("italic"))
+    except Exception:
+        pass
+    cache[ttype] = (color, bold, italic)
+    return cache[ttype]
+
 
 def _is_dark_color(hex_color):
     """判断一个颜色是否为暗色（用于自动检测深色主题）"""

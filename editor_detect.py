@@ -36,8 +36,11 @@ _JUNK_EXE_HINTS = ("unins", "uninstall", "setup", "update", "crash",
 
 def detect_editors():
     """
-    返回已安装编辑器字典 {显示名: 完整路径}。
-    检测顺序：注册表 App Paths → 常见安装路径 → 注册表 Uninstall
+    返回可用编辑器字典 {显示名: 完整路径}。
+
+    三方编辑器按以下顺序检测（命中即停）：
+        注册表 App Paths → 常见安装路径 → 注册表 Uninstall
+    之后无条件加入系统记事本，使返回值至少含一项。
     """
     editors = {}
 
@@ -50,7 +53,7 @@ def detect_editors():
         if path:
             editors[name] = path
 
-    # ── 系统记事本（兜底）──
+    # ── 系统记事本：不参与检测，直接计入候选，保证列表非空 ──
     notepad = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "System32",
                            "notepad.exe")
     if os.path.exists(notepad):

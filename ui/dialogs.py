@@ -14,7 +14,7 @@ import icon_renderer
 from editor_detect import detect_editors
 from file_handler import create_note, make_subdir, list_notes_tree
 from theme_manager import VSCodeTheme
-from ui.common import _add_hover_bg
+from ui.common import _add_hover_bg, enable_window_resize
 
 
 class DialogsMixin:
@@ -507,7 +507,10 @@ class DialogsMixin:
                     ("p", "· 大小写不敏感的子串匹配，只搜正文，不搜 YAML 元数据。"),
                     ("p", "· 结果分三组：当前文件 → 文件名匹配 → 内容匹配。"),
                     ("p", "· 「当前文件」逐条列出每处匹配的上下文片段，点击片段"),
-                    ("p", "  会滚动到正文对应位置并高亮该关键词。"),
+                    ("p", "  滚动到对应位置；正文中的命中会高亮该关键词。"),
+                    ("p", "· 代码块与表格的内容同样参与搜索，其片段前标有"),
+                    ("p", "  [代码] / [表格]。这两处无法像正文那样高亮：代码块"),
+                    ("p", "  按行定位，表格选中命中行，并在状态栏给出行列号。"),
                     ("p", "· 清空输入框即清空结果；切回文件 / 标签面板点活动栏图标。"),
                     ("p", "· 不支持模糊匹配、布尔查询与正则表达式。"),
                 ]),
@@ -535,11 +538,24 @@ class DialogsMixin:
                     ("p", "· 图片也可以做成链接，从而支持点击跳转，"),
                     ("p", "  写法见「笔记格式 → 图片」。"),
                 ]),
+                ("代码块", [
+                    ("p", "· 代码块以独立区域呈现，顶部左侧显示语言标签，"),
+                    ("p", "  右上角为「复制」按钮，点击复制整块代码。"),
+                    ("p", "· 需要复制其中一段时：用鼠标选中后按 Ctrl + C，"),
+                    ("p", "  或右键 → 复制选中 / 复制全部。"),
+                    ("p", "· 标注了语言的块按语法着色，亮 / 暗主题各用一套配色；"),
+                    ("p", "  未标注语言时显示「纯文本」，不做着色。"),
+                    ("p", "· 代码不自动折行：超长的行用块下方的水平滚动条查看，"),
+                    ("p", "  也可按住 Shift 滚动滚轮横向移动。"),
+                    ("p", "· 宽度随内容区变化，切换主题时按新配色重新渲染。"),
+                ]),
                 ("表格", [
                     ("p", "· 表格渲染为原生表格控件，列宽可拖拽调整。"),
                     ("p", "· Ctrl + C：有选中行时复制当前单元格，否则复制整行。"),
                     ("p", "· 右键表格 → 复制该单元格内容。"),
                     ("p", "· 单元格内不支持换行，也不能像文本那样拖选。"),
+                    ("p", "· 表格内容可被搜索：跳转时选中命中的那一行，"),
+                    ("p", "  状态栏给出「第几行第几列」。"),
                 ]),
                 ("回收站", [
                     ("p", "· 删除的笔记移入 data/.trash/，由活动栏第四个图标进入。"),
@@ -554,6 +570,8 @@ class DialogsMixin:
                              "Enter         恢复条目（回收站）\n"
                              "Del           彻底删除（回收站）\n"
                              "Ctrl + C      复制单元格 / 整行（表格）\n"
+                             "Ctrl + C      复制选中的代码（代码块内）\n"
+                             "Shift + 滚轮  横向滚动（代码块内）\n"
                              "Esc           关闭当前对话框"),
                     ("p", "· 「文件 → 设置…」：通用（字号 8~24）、外观（主题）、"),
                     ("p", "  编辑器（自动检测或手动指定 exe）。"),
@@ -616,17 +634,29 @@ class DialogsMixin:
                     ("p", "· Ctrl + C 复制单元格或整行，右键可复制单元格。"),
                     ("p", "· 单元格内不支持换行，也不能拖选。"),
                 ]),
+                ("代码块", [
+                    ("code", "```python\nprint(\"标注语言后可语法着色\")\n```\n\n"
+                             "~~~\n外层用 ~~~，块内就能写 ```\n~~~\n\n"
+                             "    缩进 4 空格也是代码块（无着色）\n"),
+                    ("p", "· 语言可写 python、javascript、json、sql、bash、html、"),
+                    ("p", "  yaml、cpp、java、css、markdown 等，标签显示其名称；"),
+                    ("p", "  未标注或无法识别时显示「纯文本」，不着色。"),
+                    ("p", "· 代码中的 Markdown 符号（**粗体**、# 标题等）保持原样，"),
+                    ("p", "  不会被当作格式解析。"),
+                ]),
                 ("支持的语法", [
                     ("p", "· 标题 # ~ ######（六级样式递进）"),
-                    ("p", "· 粗体 **文字**、斜体 *文字*、删除线 ~~文字~~"),
-                    ("p", "· 行内代码 `code` 与围栏代码块 ```"),
+                    ("p", "· 粗体 **文字**、斜体 *文字*、粗斜体 ***文字***"),
+                    ("p", "· 删除线 ~~文字~~（也支持 <del> 标签）"),
+                    ("p", "· 行内代码 `code` 与围栏代码块 ```（可标注语言）"),
+                    ("p", "· 任务列表 - [ ] / - [x]（显示为 ☐ / ☑）"),
                     ("p", "· 引用 >（连续多行合并为一个引用块）、分隔线 ---"),
                     ("p", "· 无序列表 -、有序列表 1.（嵌套需缩进 4 空格）"),
-                    ("p", "· 表格、图片、链接、YAML 元数据、<del> 标签"),
+                    ("p", "· 表格、图片、链接、YAML 元数据"),
                     ("p", "· 段落内的单行换行会保留（便于逐行阅读）"),
                 ]),
                 ("不支持的写法", [
-                    ("p", "· 任务列表 - [ ]：会显示为普通的列表项文字"),
+                    ("p", "· 脚注 [^1]：脚注正文会列出，但上标与回跳链接不渲染"),
                     ("p", "· 高亮 ==文字==：原样显示，不会变色"),
                     ("p", "· 其它 HTML 标签（如 <u>）：标签被忽略，只保留文字"),
                     ("p", "· 裸网址：必须写成链接语法才会被识别"),
@@ -635,8 +665,8 @@ class DialogsMixin:
         }
 
         c = self.colors
-        # 左栏不滚动，高度需容纳全部分类与小节（新增小节时同步调整）
-        W, H = 640, 590
+        # 初始尺寸（窗口可拖拽调整，左栏内容溢出时可滚动）
+        W, H = 660, 600
         is_dark = self.theme_mode == "dark"
         win_border = "#555555" if is_dark else "#777777"
         bar_bg, bar_fg = c["nav_bg"], c["nav_fg"]
@@ -684,10 +714,44 @@ class DialogsMixin:
                      background="#999" if not is_dark else "#666")
 
         left_bg = "#dddddd" if not is_dark else "#1e1e1e"
-        left = tk.Frame(pane, bg=left_bg, width=140)
+        left = tk.Frame(pane, bg=left_bg, width=150)
         right = tk.Frame(pane, bg=c["sidebar_bg"], padx=6, pady=10)
         pane.add(left, weight=0)
         pane.add(right, weight=1)
+
+        # ── 左栏：Canvas + 滚动条，内容超出高度时可滚动 ──
+        nav_canvas = tk.Canvas(left, bg=left_bg, highlightthickness=0)
+        nav_scroll = ttk.Scrollbar(left, orient=tk.VERTICAL,
+                                   command=nav_canvas.yview)
+        nav_inner = tk.Frame(nav_canvas, bg=left_bg)
+        _nav_win = nav_canvas.create_window((0, 0), window=nav_inner,
+                                            anchor="nw")
+        nav_canvas.configure(yscrollcommand=nav_scroll.set)
+        # 左侧留 8px：既不压住窗口边缘（留给拖拽缩放），也不显得贴边
+        nav_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True,
+                        padx=(8, 0))
+
+        def _sync_nav_scroll(_event=None):
+            nav_canvas.configure(scrollregion=nav_canvas.bbox("all"))
+            need = nav_inner.winfo_reqheight() > nav_canvas.winfo_height() + 1
+            if need and not nav_scroll.winfo_ismapped():
+                nav_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+            elif not need and nav_scroll.winfo_ismapped():
+                nav_scroll.pack_forget()
+
+        # 内容高度与可视高度任一方变化都要重算滚动区
+        nav_inner.bind("<Configure>", _sync_nav_scroll)
+        nav_canvas.bind("<Configure>", lambda e: (
+            nav_canvas.itemconfigure(_nav_win, width=e.width),
+            _sync_nav_scroll()))
+
+        # 折叠分类会改变内容高度，一并刷新
+        def _nav_wheel(e):
+            nav_canvas.yview_scroll(-int(e.delta / 120) or -1, "units")
+            return "break"
+
+        for _w in (nav_canvas, nav_inner):
+            _w.bind("<MouseWheel>", _nav_wheel)
 
         # ── 右侧只读文本区 ──
         text = tk.Text(right, wrap=tk.WORD, bd=0, highlightthickness=0,
@@ -731,6 +795,7 @@ class DialogsMixin:
                     sub.pack_forget()
                 else:
                     sub.pack(fill=tk.X)
+            _sync_nav_scroll()      # 折叠会改变内容高度
 
         def _toggle(cat):
             if cat in folded:
@@ -746,7 +811,7 @@ class DialogsMixin:
             _render(title, items)
 
         for cat, subs in sections.items():
-            holder = tk.Frame(left, bg=left_bg)
+            holder = tk.Frame(nav_inner, bg=left_bg)
             holder.pack(fill=tk.X)
             head = tk.Label(holder, anchor=tk.W, cursor="hand2",
                             font=("Microsoft YaHei", 10, "bold"),
@@ -780,11 +845,15 @@ class DialogsMixin:
                         break
             _select(pick[0], pick[1])
 
+        # 无边框窗口需自行支持缩放：边缘与四角可拖拽
+        enable_window_resize(dialog, titlebar=bar)
+
         # 居中于主窗口
         dialog.update_idletasks()
         x = self.root.winfo_x() + (self.root.winfo_width() - W) // 2
         y = self.root.winfo_y() + (self.root.winfo_height() - H) // 2
         dialog.geometry(f"{W}x{H}+{max(x, 0)}+{max(y, 0)}")
+        _sync_nav_scroll()
 
     def _open_settings(self):
         """打开集成设置面板（左分类 + 右内容，可拖动分隔）"""
