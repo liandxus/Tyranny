@@ -9,6 +9,9 @@ settings.json
 # 应用内回收站（删除的笔记暂存于此，不应纳入版本控制）
 data/.trash/
 
+# 运行期索引缓存（可随时由笔记重建，内容随规则变动）
+index.json
+
 # 鎵撳寘浜х墿
 build/
 dist/
