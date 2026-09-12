@@ -14,7 +14,22 @@ import icon_renderer
 from editor_detect import detect_editors
 from file_handler import create_note, make_subdir, list_notes_tree
 from theme_manager import VSCodeTheme
-from ui.common import _add_hover_bg, enable_window_resize
+from ui.common import (_add_hover_bg, enable_window_resize,
+                       set_appwindow_style, force_appwindow_style,
+                       ensure_alt_tab, show_and_focus)
+
+
+def _select_help_section(dialog, title):
+    """已打开的帮助窗口按小节名切换内容（重复打开且带分类参数时才用到）"""
+    picker = getattr(dialog, "_help_select", None)
+    if not picker:
+        return
+    sections, select = picker
+    for subs in sections.values():
+        for name, items in subs:
+            if name == title:
+                select(name, items)
+                return
 
 
 class DialogsMixin:
@@ -232,6 +247,9 @@ class DialogsMixin:
         win.attributes('-topmost', True)
         win.grab_set()
         win.update_idletasks()
+        # 提示框也登记进 Alt+Tab（不加任务栏按钮，免得一次性弹窗把任务栏
+        # 挤满），便于切到别的程序后还能切回来
+        ensure_alt_tab(win)
         win.geometry(f"{w}x{h}+{int(x)}+{int(y)}")
         try:
             hwnd = win.winfo_id()
@@ -408,6 +426,7 @@ class DialogsMixin:
         dialog.attributes('-topmost', True)
         dialog.grab_set()
         dialog.update_idletasks()
+        ensure_alt_tab(dialog)                      # 进 Alt+Tab，不占任务栏
         dialog.geometry(f"{W}x{H}+{x}+{y}")
         hwnd = dialog.winfo_id()
         ctypes.windll.user32.MoveWindow(hwnd, x, y, W, H, True)
@@ -472,8 +491,56 @@ class DialogsMixin:
         self._theme_dialog_body(dialog)
 
 
+    def _bring_to_front(self, attr):
+        """按属性名取出已打开的单例面板并唤到前台；返回是否存在可用窗口
+
+        面板若已被销毁（关闭按钮、任务栏关闭），顺带清空引用，
+        使下次打开能够正常新建。"""
+        dlg = getattr(self, attr, None)
+        if dlg is None:
+            return False
+        try:
+            if not dlg.winfo_exists():
+                setattr(self, attr, None)
+                return False
+        except tk.TclError:
+            setattr(self, attr, None)
+            return False
+        show_and_focus(dlg)          # 含从任务栏最小化状态下恢复
+        return True
+
+    def _register_dialog(self, attr, dialog):
+        """登记单例面板并显示：先设任务栏样式再显示，销毁时自动清引用
+
+        面板创建时先 withdraw，此处设完样式才 deiconify：外壳建立任务栏
+        按钮时样式已正确，因此不闪烁。"""
+        setattr(self, attr, dialog)
+
+        def _on_destroy(event=None):
+            # 子控件销毁时 Destroy 事件也会冒泡上来，只认窗口自身那一次
+            if event is not None and event.widget is not dialog:
+                return
+            if getattr(self, attr, None) is dialog:
+                setattr(self, attr, None)
+
+        dialog.bind("<Destroy>", _on_destroy)
+        ok = set_appwindow_style(dialog)
+        dialog.deiconify()
+        dialog.lift()
+        if not ok:
+            # 句柄尚未就绪时的兜底：显示后强制重建（会闪一下）
+            dialog.after(120, lambda: force_appwindow_style(dialog))
+
     def _open_help(self, category=None):
-        """打开帮助面板（左分类 + 右内容，可拖动分隔）"""
+        """打开帮助面板（左分类 + 右内容，可拖动分隔）
+
+        同一时刻只保留一个帮助窗口：已打开时不新建，而是把原窗口唤到前台，
+        使重复点击不会堆出多个帮助窗口。"""
+        if self._bring_to_front("_help_dialog"):
+            if category:
+                _select_help_section(self._help_dialog, category)
+            return
+
         # 两级结构：{分类: [(小节标题, [(类型, 文本), ...]), ...]}
         sections = {
             "操作指南": [
@@ -488,7 +555,8 @@ class DialogsMixin:
                     ("p", "· 文件树中单击文件夹可展开 / 折叠。"),
                     ("p", "· 底部「被以下笔记引用」中的条目也可单击跳转；"),
                     ("p", "  打开后文件树会自动选中对应条目。"),
-                    ("p", "· 本帮助面板：左栏点分类名折叠 / 展开，点小节名切换内容。"),
+                    ("p", "· 本帮助面板：左栏点分类名折叠 / 展开，点小节名切换内容；"),
+                    ("p", "  再次点「帮助 → 使用帮助」只会把它唤到前台，不会重复开窗。"),
                 ]),
                 ("前进与后退", [
                     ("p", "· Alt + ← 返回上一篇，Alt + → 再前进一篇；"),
@@ -577,6 +645,8 @@ class DialogsMixin:
                              "Esc           关闭当前对话框"),
                     ("p", "· 「文件 → 设置…」：通用（字号 8~24）、外观（主题）、"),
                     ("p", "  编辑器（自动检测或手动指定 exe）。"),
+                    ("p", "· 帮助、设置、字号三类窗口各自只保留一个：重复打开时把"),
+                    ("p", "  已打开的那个唤到前台，不会堆出多个窗口。"),
                     ("p", "· 「视图」菜单：字号…、切换主题、图片适应宽度 / 原始尺寸、"),
                     ("p", "  隐藏或显示侧栏、跟随系统主题。"),
                     ("p", "· 设置保存在程序目录的 settings.json 中。"),
@@ -603,7 +673,7 @@ class DialogsMixin:
                 ]),
                 ("内部链接", [
                     ("code", "[[笔记名]]\n[[笔记名|显示的文字]]\n[显示的文字](笔记名)"),
-                    ("p", "· 三种写法都指向站内笔记，单击即可跳转。"),
+                    ("p", "· 三种写法都指向站内笔记，单击即可跳转，也都会被记入该笔记的反向链接。"),
                     ("p", "· 也可写相对路径，如 [文字](./目录/笔记.md)。"),
                     ("p", "· 被引用的笔记底部会自动显示「被以下笔记引用」列表。"),
                 ]),
@@ -678,6 +748,7 @@ class DialogsMixin:
         bar_btn_hover = "#e81123" if not is_dark else "#c03333"
 
         dialog = tk.Toplevel(self.root)
+        dialog.withdraw()            # 内容与样式齐备后再显示，避免出现过程闪动
         dialog.overrideredirect(True)
         dialog.configure(bg=c["sidebar_bg"], highlightthickness=1,
                          highlightbackground=win_border)
@@ -836,6 +907,9 @@ class DialogsMixin:
                               else left_bg)
             _render(title, items)
 
+        # 供重复打开时按小节名切换内容（_select_help_section 取用）
+        dialog._help_select = (sections, _select)
+
         for cat, subs in sections.items():
             holder = tk.Frame(nav_inner, bg=left_bg)
             holder.pack(fill=tk.X)
@@ -881,8 +955,18 @@ class DialogsMixin:
         dialog.geometry(f"{W}x{H}+{max(x, 0)}+{max(y, 0)}")
         _sync_nav_scroll()
 
+        # 任务栏右键关闭与 Alt+F4 都走同一套收尾（记录尺寸并清引用）
+        dialog.protocol("WM_DELETE_WINDOW", _close_help)
+        # 单例登记 + 任务栏/Alt+Tab 集成（内部先设样式再显示，不闪烁）
+        self._register_dialog("_help_dialog", dialog)
+
     def _open_settings(self):
-        """打开集成设置面板（左分类 + 右内容，可拖动分隔）"""
+        """打开集成设置面板（左分类 + 右内容，可拖动分隔）
+
+        与帮助窗口同样只保留一份：已打开时唤到前台，不再新建。"""
+        if self._bring_to_front("_settings_dialog"):
+            return
+
         c = self.colors
         W, H = 600, 420
         is_dark = self.theme_mode == "dark"
@@ -893,6 +977,7 @@ class DialogsMixin:
         bar_btn_hover = "#e81123" if not is_dark else "#c03333"
 
         dialog = tk.Toplevel(self.root)
+        dialog.withdraw()            # 内容与样式齐备后再显示，避免出现过程闪动
         dialog.overrideredirect(True)
         dialog.configure(bg=c["sidebar_bg"], highlightthickness=1,
                          highlightbackground=win_border)
@@ -1174,29 +1259,41 @@ class DialogsMixin:
         dialog.bind("<B1-Motion>", _do, add="+")
         dialog.bind("<ButtonRelease-1>", lambda e: setattr(dialog, '_rs', None), add="+")
 
-        # ── 居中（topmost → grab → update → geometry，与其他二级窗口一致）──
+        # ── 居中：先设样式再显示，最后 grab（grab 要求窗口已映射）──
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
         x, y = (sw - W) // 2, (sh - H) // 2
         dialog.attributes('-topmost', True)
-        dialog.grab_set()
         dialog.update_idletasks()
         dialog.geometry(f"{W}x{H}+{int(x)}+{int(y)}")
+        set_appwindow_style(dialog)   # 显示前设好，任务栏按钮建立时即带上
+        dialog.deiconify()
+        dialog.update_idletasks()     # 等窗口真正映射
+        try:
+            dialog.grab_set()
+        except tk.TclError:
+            pass                      # 极端情况下退化为非模态，不影响使用
         try:
             ctypes.windll.user32.MoveWindow(
                 dialog.winfo_id(), x, y, W, H, True)
         except Exception:
             pass
-        dialog.lift()
         dialog.focus_force()
         dialog.bind("<Escape>", lambda e: dialog.destroy())
+        self._register_dialog("_settings_dialog", dialog)
 
     def _open_font_dialog(self):
-        """打开字号设置弹窗（+/- 按钮 + 输入 + 重置）"""
+        """打开字号设置弹窗（+/- 按钮 + 输入 + 重置）
+
+        与帮助、设置同样只保留一份：已打开时唤到前台，不再新建。"""
+        if self._bring_to_front("_font_dialog"):
+            return
+
         c = self.colors
         W, H = 320, 210
 
         dialog = tk.Toplevel(self.root)
+        dialog.withdraw()            # 内容与样式齐备后再显示，避免出现过程闪动
         dialog.overrideredirect(True)
         win_border = "#555555" if self.theme_mode == "dark" else "#777777"
         dialog.configure(bg=c["sidebar_bg"], highlightthickness=1,
@@ -1339,6 +1436,6 @@ class DialogsMixin:
         except Exception:
             pass
         dialog.attributes('-topmost', True)
-        dialog.lift()
         dialog.focus_force()
         dialog.bind("<Escape>", lambda e: dialog.destroy())
+        self._register_dialog("_font_dialog", dialog)

@@ -13,10 +13,17 @@ import tkinter as tk
 from tkinter import ttk
 
 import icon_renderer
-from ui.common import _add_hover_bg, ASSETS_DIR
+from ui.common import (_add_hover_bg, ASSETS_DIR,
+                       set_appwindow_style, force_appwindow_style)
 
 # 窗口边缘拖拽判定阈值（像素）
 RESIZE_EDGE = 8
+
+# 标题栏高度（像素）：界面绘制与 Win32 命中测试共用同一取值，
+# 两处若各写各的，会出现"看着是标题栏、点下去却不是"的错位
+TITLEBAR_HEIGHT = 42
+# 标题栏图标尺寸
+TITLEBAR_LOGO_SIZE = 24
 
 
 class TitleBarMixin:
@@ -26,16 +33,19 @@ class TitleBarMixin:
 
     def _build_titlebar(self):
         """自定义标题栏：拖拽移动 + 窗口控制按钮"""
-        bar = tk.Frame(self.root, height=30)
+        bar = tk.Frame(self.root, height=TITLEBAR_HEIGHT)
         bar.grid(row=0, column=0, sticky="ew")
-        bar.grid_propagate(False)
+        # 子控件用的是 pack，故须关闭 pack 传播；若误用 grid_propagate，
+        # frame 的请求高度会一直由子控件决定，height 设置形同虚设
+        bar.pack_propagate(False)
         self.titlebar = bar
 
-        # ── 应用图标（亮/暗主题 PNG）──
+        # ── 应用图标（亮/暗主题 PNG，24px）──
+        # 左侧留白比其余区域稍大：logo 紧贴窗口边缘会显得局促
         self._logo_img = None
         self.title_icon = tk.Label(bar, text="",
-                                   padx=6, pady=2)
-        self.title_icon.pack(side=tk.LEFT, padx=(2, 20))
+                                   padx=8, pady=4)
+        self.title_icon.pack(side=tk.LEFT, padx=(12, 24))
         self._update_title_logo()
 
         # ── 菜单栏 ──
@@ -60,8 +70,8 @@ class TitleBarMixin:
         ]
         for name, items in self._menu_defs:
             lbl = tk.Label(bar, text=name,
-                          font=("Segoe UI", 10),
-                          padx=10, pady=1,
+                          font=("Microsoft YaHei", 11),
+                          padx=14, pady=3,
                           fg=self.colors["toolbar_fg"],
                           cursor="hand2")
             lbl.pack(side=tk.LEFT)
@@ -74,23 +84,18 @@ class TitleBarMixin:
         btn_frame = tk.Frame(bar)
         btn_frame.pack(side=tk.RIGHT, fill=tk.Y)
 
-        btn_size = 20
-
         self.min_btn = self._make_title_btn(
-            btn_frame, "─", btn_size,
-            self._minimize_window,
+            btn_frame, "─", self._minimize_window,
         )
         self.min_btn.pack(side=tk.LEFT, padx=0, fill=tk.Y)
 
         self.max_btn = self._make_title_btn(
-            btn_frame, "□", btn_size,
-            self._toggle_maximize,
+            btn_frame, "□", self._toggle_maximize,
         )
         self.max_btn.pack(side=tk.LEFT, padx=0, fill=tk.Y)
 
         self.close_btn = self._make_title_btn(
-            btn_frame, "✕", btn_size,
-            self._on_close,
+            btn_frame, "✕", self._on_close,
         )
         self.close_btn.pack(side=tk.LEFT, padx=0, fill=tk.Y)
 
@@ -103,18 +108,50 @@ class TitleBarMixin:
         _add_hover_bg(self.close_btn,
                       self.colors["toolbar_bg"], _close_hover)
 
+        # ── 供 Win32 命中测试使用的布局缓存 ──
+        # WM_NCHITTEST 在每次鼠标移动时都会进入窗口过程；若在其中现场调
+        # winfo_*（Tcl 调用），Tcl 繁忙时会拖慢消息处理，拖动窗口就发顿。
+        # 故只在标题栏尺寸变化时缓存一次交互控件的横向范围。
+        self._bar_regions = None       # (按钮区左边界, [(菜单左, 菜单右), ...])
+        # Configure 覆盖尺寸变化；<Map> 覆盖“启动时窗口未映射、首次 Configure
+        # 阶段子控件尚无真实几何”的情形——映射完成后必须再取一次
+        bar.bind("<Configure>", lambda e: self._cache_bar_regions(), add="+")
+        bar.bind("<Map>", lambda e: self._cache_bar_regions(), add="+")
+
         # ── 拖拽绑定（菜单项本身不参与拖拽，避免和点击菜单冲突）──
         for widget in (bar, self.title_icon):
             widget.bind("<Button-1>", self._start_drag)
             widget.bind("<B1-Motion>", self._do_drag)
+            widget.bind("<ButtonRelease-1>", self._end_drag)
             widget.bind("<Double-Button-1>",
                         lambda e: self._toggle_maximize())
+
+    def _cache_bar_regions(self):
+        """缓存标题栏内交互控件（菜单、窗口按钮）的横向范围
+
+        用 winfo_x()（相对标题栏）而非 winfo_rootx()（相对屏幕）：后者
+        在窗口尚未映射时（如启动时的 withdraw 阶段）取到 0，与根窗口的
+        屏幕坐标相减会得到错误范围，命中测试随之全部失准。"""
+        try:
+            btn_frame = self.titlebar.winfo_children()[-1]
+            btn_left = btn_frame.winfo_x()
+            menus = [(lbl.winfo_x(), lbl.winfo_x() + lbl.winfo_width())
+                     for lbl in self._menu_labels]
+            # 合理性校验：控件尚未布局时 winfo_x/width 会给出 0/1，
+            # 这种缓存比没有更糟，直接置空走命中测试的兜底分支
+            if (btn_left <= 1 or self.titlebar.winfo_width() <= 1
+                    or any(b - a <= 1 for a, b in menus)):
+                self._bar_regions = None
+                return
+            self._bar_regions = (btn_left, menus)
+        except Exception:
+            self._bar_regions = None
 
     def _update_title_logo(self):
         """加载当前主题对应的应用图标 PNG"""
         import os
-        fname = ("light_16.png" if self.theme_mode == "light"
-                 else "dark_16.png")
+        fname = ("light_24.png" if self.theme_mode == "light"
+                 else "dark_24.png")
         path = os.path.join(ASSETS_DIR, fname)
         if not os.path.exists(path):
             return
@@ -124,12 +161,12 @@ class TitleBarMixin:
         except tk.TclError:
             pass
 
-    def _make_title_btn(self, parent, text, size, cmd):
-        """创建标题栏按钮"""
+    def _make_title_btn(self, parent, text, cmd, font_size=12, width=4):
+        """创建标题栏按钮（宽度以字符计，随字号放大而加宽）"""
         btn = tk.Button(
             parent, text=text,
-            font=("Segoe UI", 10),
-            width=3, height=0,
+            font=("Segoe UI", font_size),
+            width=width, height=0,
             relief=tk.FLAT, bd=0,
             cursor="hand2",
             command=cmd,
@@ -138,6 +175,7 @@ class TitleBarMixin:
 
 
     def _start_drag(self, event):
+        self._dragging = True          # 拖动期间后台轮询暂停（见 _watch_data_dir）
         self._drag_data["x"] = event.x_root
         self._drag_data["y"] = event.y_root
         if self._is_maximized:
@@ -156,6 +194,10 @@ class TitleBarMixin:
             # fallback
             self._drag_data.setdefault("normal_w", 1100)
             self._drag_data.setdefault("normal_h", 680)
+
+    def _end_drag(self, _event=None):
+        """拖动结束：恢复后台轮询（拖动期间轮询暂停，见 _watch_data_dir）"""
+        self._dragging = False
 
     def _do_drag(self, event):
         if self._is_maximized:
@@ -372,58 +414,12 @@ class TitleBarMixin:
     # ── Alt+Tab 修复 ──
 
     def _set_appwindow_style(self):
-        """把 overrideredirect 窗口标为 WS_EX_APPWINDOW，使其进入任务栏与 Alt+Tab。
-
-        窗口尚未显示时调用：样式在窗口映射前就绪，外壳建立任务栏按钮时
-        即为正确状态，不必事后隐藏/重建，因此不会出现闪烁。
-        返回是否已确认生效。"""
-        try:
-            user32 = ctypes.windll.user32
-            hwnd = user32.GetParent(self.root.winfo_id())
-            if not hwnd:
-                return False
-            # GWL_EXSTYLE = -20
-            current = user32.GetWindowLongW(hwnd, -20)
-            # 移除 WS_EX_TOOLWINDOW (0x80)，添加 WS_EX_APPWINDOW (0x40000)
-            new_style = (current & ~0x80) | 0x40000
-            if new_style != current:
-                user32.SetWindowLongW(hwnd, -20, new_style)
-                # 强制刷新窗口框架，让任务栏识别
-                user32.SetWindowPos(
-                    hwnd, 0, 0, 0, 0, 0,
-                    0x0002 | 0x0001 | 0x0020,  # NOMOVE | NOSIZE | FRAMECHANGED
-                )
-            return bool(user32.GetWindowLongW(hwnd, -20) & 0x40000)
-        except Exception:
-            return False
+        """把主窗口标为 WS_EX_APPWINDOW，使其进入任务栏与 Alt+Tab（见 ui.common）"""
+        return set_appwindow_style(self.root)
 
     def _fix_alt_tab(self):
         """兜底：窗口已显示才发现任务栏缺按钮时，强制外壳重建（会闪一下）"""
-        if self._set_appwindow_style():
-            return
-        try:
-            user32 = ctypes.windll.user32
-            hwnd = user32.GetParent(self.root.winfo_id())
-            if not hwnd:
-                return
-            # GWL_EXSTYLE = -20
-            current = user32.GetWindowLongW(hwnd, -20)
-            # 移除 WS_EX_TOOLWINDOW (0x80)，添加 WS_EX_APPWINDOW (0x40000)
-            new_style = (current & ~0x80) | 0x40000
-            user32.SetWindowLongW(hwnd, -20, new_style)
-            # 强制刷新窗口框架，让任务栏识别
-            user32.SetWindowPos(
-                hwnd, 0, 0, 0, 0, 0,
-                0x0002 | 0x0001 | 0x0020,  # NOMOVE | NOSIZE | FRAMECHANGED
-            )
-            # 仅改样式时，外壳往往要等窗口下一次被激活才补建任务栏按钮，
-            # 表现为「窗口已显示、任务栏图标要点击或切换焦点后才出现」。
-            # 这里隐藏再显示一次，强制外壳立即重建按钮。
-            user32.ShowWindow(hwnd, 0)   # SW_HIDE
-            user32.ShowWindow(hwnd, 5)   # SW_SHOW
-            user32.SetForegroundWindow(hwnd)
-        except Exception:
-            pass
+        force_appwindow_style(self.root)
 
     # ── Windows 原生窗口管理（Aero Snap） ──
 
@@ -451,8 +447,8 @@ class TitleBarMixin:
             # 存储原始窗口过程地址
             self._win32_original_proc = None
 
-            TITLEBAR_HEIGHT = 30
-            BUTTON_AREA_WIDTH = 120
+            # 标题栏高度取自模块常量，与界面绘制保持一致
+            BUTTON_AREA_WIDTH = 150     # 取不到按钮实际位置时的兜底宽度
             EDGE = 8       # 上/下/左边框
             EDGE_R = 5     # 右边框稍窄，避免和滚动条冲突
 
@@ -475,21 +471,8 @@ class TitleBarMixin:
                     on_top = rel_y < EDGE
                     on_bottom = rel_y > win_h - EDGE
 
-                    # 标题栏区域（按钮排除在外）
-                    if on_top and rel_y < TITLEBAR_HEIGHT:
-                        try:
-                            btn_frame = self.titlebar.winfo_children()[-1]
-                            btn_left = btn_frame.winfo_rootx()
-                            if x >= btn_left:
-                                return 1  # HTCLIENT
-                        except Exception:
-                            if x >= rect[2] - BUTTON_AREA_WIDTH:
-                                return 1
-                        if self._is_maximized:
-                            return 1  # HTCLIENT
-                        return 2  # HTCAPTION
-
-                    # 四角
+                    # 四角与四边优先于标题栏：窗口边缘在整条高度上
+                    # （含标题栏一段）都要能缩放
                     if on_left and on_top:
                         return 13   # HTTOPLEFT
                     if on_right and on_top:
@@ -498,7 +481,6 @@ class TitleBarMixin:
                         return 16   # HTBOTTOMLEFT
                     if on_right and on_bottom:
                         return 17   # HTBOTTOMRIGHT
-                    # 四边
                     if on_left:
                         return 10   # HTLEFT
                     if on_right:
@@ -507,6 +489,22 @@ class TitleBarMixin:
                         return 12   # HTTOP
                     if on_bottom:
                         return 15   # HTBOTTOM
+
+                    # 标题栏区域：空白处交给 Windows 原生拖动（流畅），
+                    # 菜单与窗口按钮保持客户区，让 Tk 正常响应点击
+                    if rel_y < TITLEBAR_HEIGHT:
+                        regions = self._bar_regions
+                        if regions is not None:
+                            btn_left, menus = regions
+                            if rel_x >= btn_left:
+                                return 1  # HTCLIENT（窗口按钮）
+                            if any(a <= rel_x < b for a, b in menus):
+                                return 1  # HTCLIENT（菜单项）
+                        elif x >= rect[2] - BUTTON_AREA_WIDTH:
+                            return 1  # 布局未就绪时的兜底
+                        if self._is_maximized:
+                            return 1  # 最大化时交给 Tk 的下拉还原逻辑
+                        return 2  # HTCAPTION：原生拖动 + Aero Snap
 
                 # ── WM_ERASEBKGND：阻止闪烁 ──
                 if msg == 0x0014:
@@ -559,6 +557,7 @@ class TitleBarMixin:
                 hwnd, -4,  # GWLP_WNDPROC
                 ctypes.cast(wndproc, ctypes.c_void_p).value,
             )
+            self._cache_bar_regions()     # 钩子生效时布局已就绪，先取一次
         except Exception:
             pass  # 失败则回退到手动拖拽
 

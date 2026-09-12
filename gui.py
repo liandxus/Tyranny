@@ -67,6 +67,7 @@ class IndeXarApp(TitleBarMixin, FileTreeMixin, TagPanelMixin,
 
         # 窗口状态
         self._drag_data = {"x": 0, "y": 0}
+        self._dragging = False         # 标题栏拖动进行中（轮询暂停开关）
         self._is_maximized = False
         self._normal_geometry = None
         self._resize_region = ""
@@ -108,6 +109,10 @@ class IndeXarApp(TitleBarMixin, FileTreeMixin, TagPanelMixin,
         self._help_width = 660
         self._help_height = 600
         self._help_left_width = 150
+        # 当前已打开的单例面板；同一时刻各自只允许一个（见 _open_help 等）
+        self._help_dialog = None
+        self._settings_dialog = None
+        self._font_dialog = None
 
         # 构建界面
         self._build_layout()
@@ -276,13 +281,19 @@ class IndeXarApp(TitleBarMixin, FileTreeMixin, TagPanelMixin,
     def run(self):
         # 在窗口首次显示之前把 AppWindow 样式设好，再显示：
         # 外壳建立任务栏按钮时样式已正确，无需事后隐藏/重建（不闪烁）
+        ok = False
         try:
             self.root.withdraw()
             self.root.update_idletasks()
             ok = self._set_appwindow_style()
-            self.root.deiconify()
         except Exception:
             ok = False
+        finally:
+            # 无论样式设置是否成功都必须把窗口显示出来：若中途抛出异常而
+            # 停在 withdraw 之后的某一步，窗口会一直隐藏，表现为
+            # 「进程在运行、界面打不开」
+            self.root.deiconify()
+            self.root.lift()
         # 极少数环境下提前设置未生效，退回「显示后强制重建」的兜底方案
         if not ok:
             self.root.after(300, self._fix_alt_tab)
@@ -311,6 +322,11 @@ class IndeXarApp(TitleBarMixin, FileTreeMixin, TagPanelMixin,
 
     def _watch_data_dir(self):
         """轮询 data 目录，响应外部编辑/文件增删"""
+        if getattr(self, "_dragging", False):
+            # 拖动期间暂停检测：本轮轮询与索引重建都会阻塞主线程，
+            # 表现为拖动发顿；积压的变化在拖动结束后的下一轮一并处理
+            self.root.after(800, self._watch_data_dir)
+            return
         try:
             from file_handler import collect_mtimes
             current = collect_mtimes()
