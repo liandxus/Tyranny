@@ -104,6 +104,11 @@ class IndeXarApp(TitleBarMixin, FileTreeMixin, TagPanelMixin,
         # 外部编辑器路径
         self._editor_path = "notepad.exe"
 
+        # 帮助窗口的尺寸与左栏宽度（关闭时写回，下次打开沿用）
+        self._help_width = 660
+        self._help_height = 600
+        self._help_left_width = 150
+
         # 构建界面
         self._build_layout()
 
@@ -239,6 +244,9 @@ class IndeXarApp(TitleBarMixin, FileTreeMixin, TagPanelMixin,
                     ctr.configure(height=self._file_tags_height)
         self._editor_path = s["editor_path"]
         self._image_mode = s["image_mode"]
+        self._help_width = s["help_width"]
+        self._help_height = s["help_height"]
+        self._help_left_width = s["help_left_width"]
 
     def _save_settings(self):
         """将当前配置写入 settings.json（写入与兜底由 config 负责）"""
@@ -251,6 +259,9 @@ class IndeXarApp(TitleBarMixin, FileTreeMixin, TagPanelMixin,
             "file_tags_height": self._file_tags_height,
             "editor_path": self._editor_path,
             "image_mode": self._image_mode,
+            "help_width": self._help_width,
+            "help_height": self._help_height,
+            "help_left_width": self._help_left_width,
         })
 
     # ══════════════════════════════════

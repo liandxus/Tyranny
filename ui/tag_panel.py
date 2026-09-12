@@ -105,6 +105,7 @@ class TagPanelMixin:
 
         self.tag_tree.bind("<<TreeviewSelect>>", self._on_tag_tree_select)
         self.tag_tree.bind("<Double-Button-1>", self._on_tag_tree_double_click)
+        self.tag_tree.bind("<ButtonPress-1>", self._on_tag_tree_press)
         self.tag_tree.bind("<ButtonRelease-1>", self._on_tag_tree_click)
         self.tag_tree.bind("<Motion>", self._on_tag_tree_motion)
         self.tag_tree.bind("<Leave>", self._on_tag_tree_leave)
@@ -473,18 +474,38 @@ class TagPanelMixin:
         else:
             self._update_tag_intersection(tag_iids)
 
+    def _on_tag_tree_press(self, event):
+        """记录按下前的选中集合与修饰键，供 release 判断本次点击的意图"""
+        self._tag_sel_before = [i for i in self.tag_tree.selection()
+                                if i.startswith("tag_")]
+        # Ctrl=0x0004、Shift=0x0001
+        self._tag_press_mods = bool(event.state & (0x0004 | 0x0001))
+
     def _on_tag_tree_click(self, event):
-        """单击标签节点 → 展开/折叠"""
+        """单击标签节点 → 展开/折叠（与多选互不干扰）"""
         iid = self.tag_tree.identify_row(event.y)
         if not iid or not iid.startswith("tag_"):
             return
 
-        # 只对单选的标签切换展开
-        sel = self.tag_tree.selection()
-        tag_iids = [i for i in sel if i.startswith("tag_")]
+        # Ctrl / Shift 点击的用意是加选或减选，不应顺带展开或折叠列表
+        if getattr(self, "_tag_press_mods", False):
+            return
+
+        before = getattr(self, "_tag_sel_before", [])
+        # 多选状态下点击其中一个已展开的标签，本意是收起列表：
+        # 折叠后恢复原有选中集合，否则选中改动会连带清掉交集结果
+        if len(before) >= 2 and iid in before and self.tag_tree.item(iid, "open"):
+            self.tag_tree.item(iid, open=False)
+            self.tag_tree.selection_set(before)
+            self._update_tag_intersection(before)
+            return
+
+        # 其余情况：只对单选的标签切换展开
+        tag_iids = [i for i in self.tag_tree.selection()
+                    if i.startswith("tag_")]
         if len(tag_iids) == 1 and tag_iids[0] == iid:
-            current = self.tag_tree.item(iid, "open")
-            self.tag_tree.item(iid, open=not current)
+            self.tag_tree.item(iid,
+                               open=not self.tag_tree.item(iid, "open"))
 
     def _on_tag_tree_double_click(self, event):
         """双击文件节点 → 打开笔记"""

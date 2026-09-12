@@ -28,6 +28,10 @@ DEFAULTS = {
     "file_tags_height": 88,
     "editor_path": "notepad.exe",
     "image_mode": "fit",
+    # 帮助窗口：上次关闭时的尺寸与左栏宽度
+    "help_width": 660,
+    "help_height": 600,
+    "help_left_width": 150,
 }
 
 # 类型校验器：读取时按此转换，转换失败则保留默认值
@@ -40,6 +44,9 @@ _CONVERTERS = {
     "file_tags_height": int,
     "editor_path": str,
     "image_mode": str,
+    "help_width": int,
+    "help_height": int,
+    "help_left_width": int,
 }
 
 _VALID_THEMES = ("light", "dark")

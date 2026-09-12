@@ -520,6 +520,8 @@ class DialogsMixin:
                     ("p", "· 选中多个标签即可求交集（同时含这些标签的笔记）："),
                     ("p", "    Ctrl  + 点击  →  逐个加选或取消，适合不相邻的标签"),
                     ("p", "    Shift + 点击  →  选中两次点击之间的连续范围"),
+                    ("p", "· 带 Ctrl / Shift 的点击只调整选中，不会展开或折叠列表；"),
+                    ("p", "  多选状态下收起某个列表，已选的标签与交集结果都会保留。"),
                     ("p", "· 顶部显示「标签A ∩ 标签B → N 个文件」，双击列表项打开。"),
                 ]),
                 ("当前文件标签", [
@@ -665,8 +667,11 @@ class DialogsMixin:
         }
 
         c = self.colors
-        # 初始尺寸（窗口可拖拽调整，左栏内容溢出时可滚动）
-        W, H = 660, 600
+        # 尺寸与左栏宽度沿用上次关闭时的取值（见下方 _close_help）
+        W = max(420, min(1600, int(getattr(self, "_help_width", 660) or 660)))
+        H = max(300, min(1200, int(getattr(self, "_help_height", 600) or 600)))
+        left_w = max(90, min(400,
+                             int(getattr(self, "_help_left_width", 150) or 150)))
         is_dark = self.theme_mode == "dark"
         win_border = "#555555" if is_dark else "#777777"
         bar_bg, bar_fg = c["nav_bg"], c["nav_fg"]
@@ -682,11 +687,25 @@ class DialogsMixin:
         bar = tk.Frame(dialog, height=28, bg=bar_bg)
         bar.pack(fill=tk.X, side=tk.TOP)
         bar.pack_propagate(False)
+        def _close_help():
+            """关闭前记录窗口尺寸与左栏宽度，下次打开时沿用。
+
+            记录的是画布宽度而非整个左栏：左栏还有边距与滚动条占位，
+            若把左栏宽度当作画布宽度还原，每次开关都会再胖一圈。"""
+            try:
+                self._help_width = dialog.winfo_width()
+                self._help_height = dialog.winfo_height()
+                self._help_left_width = nav_canvas.winfo_width()
+                self._save_settings()
+            except Exception:
+                pass
+            dialog.destroy()
+
         tk.Label(bar, text="  帮助", font=("Microsoft YaHei", 10),
                  anchor=tk.W, bg=bar_bg, fg=bar_fg
                  ).pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         tk.Button(bar, text="✕", font=("Segoe UI", 9),
-                  relief=tk.FLAT, bd=0, padx=8, command=dialog.destroy,
+                  relief=tk.FLAT, bd=0, padx=8, command=_close_help,
                   bg=bar_bg, fg=bar_fg,
                   activebackground=bar_btn_hover, activeforeground="#ffffff"
                   ).pack(side=tk.RIGHT, fill=tk.Y)
@@ -714,30 +733,37 @@ class DialogsMixin:
                      background="#999" if not is_dark else "#666")
 
         left_bg = "#dddddd" if not is_dark else "#1e1e1e"
-        left = tk.Frame(pane, bg=left_bg, width=150)
+        # 左栏宽度由画布显式给出：Frame 自身的 width 会被子控件的请求宽度顶掉
+        left = tk.Frame(pane, bg=left_bg)
         right = tk.Frame(pane, bg=c["sidebar_bg"], padx=6, pady=10)
         pane.add(left, weight=0)
         pane.add(right, weight=1)
 
         # ── 左栏：Canvas + 滚动条，内容超出高度时可滚动 ──
-        nav_canvas = tk.Canvas(left, bg=left_bg, highlightthickness=0)
+        nav_canvas = tk.Canvas(left, width=left_w, bg=left_bg,
+                               highlightthickness=0)
         nav_scroll = ttk.Scrollbar(left, orient=tk.VERTICAL,
                                    command=nav_canvas.yview)
         nav_inner = tk.Frame(nav_canvas, bg=left_bg)
         _nav_win = nav_canvas.create_window((0, 0), window=nav_inner,
                                             anchor="nw")
         nav_canvas.configure(yscrollcommand=nav_scroll.set)
+        # 左栏用 grid 而非 pack：pack 下 canvas（先 pack、expand=True）
+        # 会先占走份额，栏宽一收紧滚动条就只剩一条缝，看起来像被遮盖；
+        # grid 中滚动条独占一个定宽列，canvas 只吃剩余宽度。
+        left.grid_rowconfigure(0, weight=1)
+        left.grid_columnconfigure(0, weight=1)
+        left.grid_columnconfigure(1, weight=0)
         # 左侧留 8px：既不压住窗口边缘（留给拖拽缩放），也不显得贴边
-        nav_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True,
-                        padx=(8, 0))
+        nav_canvas.grid(row=0, column=0, sticky="nsew", padx=(8, 0))
 
         def _sync_nav_scroll(_event=None):
             nav_canvas.configure(scrollregion=nav_canvas.bbox("all"))
             need = nav_inner.winfo_reqheight() > nav_canvas.winfo_height() + 1
             if need and not nav_scroll.winfo_ismapped():
-                nav_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+                nav_scroll.grid(row=0, column=1, sticky="ns")
             elif not need and nav_scroll.winfo_ismapped():
-                nav_scroll.pack_forget()
+                nav_scroll.grid_remove()
 
         # 内容高度与可视高度任一方变化都要重算滚动区
         nav_inner.bind("<Configure>", _sync_nav_scroll)
