@@ -361,8 +361,10 @@ class IndeXarApp(TitleBarMixin, FileTreeMixin, TagPanelMixin,
                     self._close_file()
             # 删除同样会使索引失效（标签索引按路径记录、反向链接按笔记名记录），
             # 故重建条件包含 removed，避免索引残留已不存在的笔记。
+            # 删除引发的重建绕过节流：否则这一轮被挡掉后，索引会一直停在
+            # 「包含已删除笔记」的错误状态，直到下一次重建机会。
             if added or removed or modified:
-                self._rebuild_indexes()
+                self._rebuild_indexes(force=bool(removed))
             if (self._current_note_path and
                     self._current_note_path in (added + modified)):
                 self._rerender_current_note()
@@ -371,11 +373,16 @@ class IndeXarApp(TitleBarMixin, FileTreeMixin, TagPanelMixin,
         finally:
             self.root.after(1500, self._watch_data_dir)
 
-    def _rebuild_indexes(self):
-        """节流重建标签与反向链接索引并刷新标签区"""
+    def _rebuild_indexes(self, force=False):
+        """节流重建标签与反向链接索引并刷新标签区
+
+        force=True 绕过节流。「删除」必须立即生效：索引里残留已不存在的
+        笔记会让标签面板列出它、点击打开失败，而这种错误状态会一直持续到
+        下一次有人触发重建——若节流恰好挡掉这一轮，就要等满一个节流窗口
+        才可能被纠正。新增与修改则可以等。"""
         import time
         now = time.time()
-        if now - getattr(self, "_last_index_build", 0.0) < 0.8:
+        if not force and now - getattr(self, "_last_index_build", 0.0) < 0.8:
             return
         self._last_index_build = now
         try:
